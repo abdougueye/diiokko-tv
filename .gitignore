@@ -58,7 +58,6 @@ crashlytics-build.log
 obj/
 .cxx/
 
-
 # Random file
 *.m3u
 *.sqlite*
