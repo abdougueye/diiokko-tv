@@ -1,0 +1,64 @@
+# =========================
+# Android / Kotlin / Gradle
+# =========================
+
+# Gradle files
+.gradle/
+build/
+**/build/
+
+# Local Gradle cache
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+*.hprof
+
+# Kotlin
+*.kotlin_module
+
+# Android generated files
+captures/
+output.json
+navigation/
+
+# Android Studio Navigation editor temp files
+*.nav
+
+# External native build
+.externalNativeBuild/
+
+# Google Services / Firebase
+google-services.json
+*.keystore
+
+# Log files
+*.log
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# VS Code
+.vscode/
+
+# Firebase crashlytics
+crashlytics-build.log
+
+# JetBrains
+.idea/
+*.iws
+*.ipr
+
+# NDK
+obj/
+.cxx/
+
+
+# Random file
+*.m3u
+*.sqlite*
