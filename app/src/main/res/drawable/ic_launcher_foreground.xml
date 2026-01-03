@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- D letter stylized as play button -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,30 L40,78 C40,78 70,54 70,54 C70,54 40,30 40,30 Z"/>
+    
+    <!-- Inner accent -->
+    <path
+        android:fillColor="#E94560"
+        android:pathData="M45,40 L45,68 C45,68 62,54 62,54 C62,54 45,40 45,40 Z"/>
+</vector>
