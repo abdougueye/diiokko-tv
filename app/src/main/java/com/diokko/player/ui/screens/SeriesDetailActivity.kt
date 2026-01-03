@@ -62,10 +62,19 @@ class SeriesDetailActivity : ComponentActivity() {
                     seriesId = seriesId,
                     seriesName = seriesName,
                     onBack = { finish() },
-                    onPlayEpisode = { url, title ->
+                    onPlayEpisode = { episode, nextEpisode, seriesTitle ->
                         val playerIntent = Intent(this, VideoPlayerActivity::class.java).apply {
-                            putExtra(VideoPlayerActivity.EXTRA_URL, url)
-                            putExtra(VideoPlayerActivity.EXTRA_TITLE, title)
+                            putExtra(VideoPlayerActivity.EXTRA_URL, episode.streamUrl)
+                            putExtra(VideoPlayerActivity.EXTRA_TITLE, "$seriesTitle - ${episode.name}")
+                            putExtra(VideoPlayerActivity.EXTRA_CONTENT_TYPE, "SERIES")
+                            putExtra(VideoPlayerActivity.EXTRA_SERIES_ID, seriesId)
+                            putExtra(VideoPlayerActivity.EXTRA_SEASON, episode.season)
+                            putExtra(VideoPlayerActivity.EXTRA_EPISODE_NUM, episode.episodeNum)
+                            // Pass next episode info if available
+                            if (nextEpisode != null) {
+                                putExtra(VideoPlayerActivity.EXTRA_NEXT_EPISODE_URL, nextEpisode.streamUrl)
+                                putExtra(VideoPlayerActivity.EXTRA_NEXT_EPISODE_TITLE, "$seriesTitle - ${nextEpisode.name}")
+                            }
                         }
                         startActivity(playerIntent)
                     }
@@ -152,7 +161,7 @@ fun SeriesDetailScreen(
     seriesId: Long,
     seriesName: String,
     onBack: () -> Unit,
-    onPlayEpisode: (url: String, title: String) -> Unit,
+    onPlayEpisode: (episode: Episode, nextEpisode: Episode?, seriesTitle: String) -> Unit,
     viewModel: SeriesDetailViewModel = hiltViewModel()
 ) {
     val series by viewModel.series.collectAsState()
@@ -161,12 +170,28 @@ fun SeriesDetailScreen(
     val selectedSeason by viewModel.selectedSeason.collectAsState()
     
     val seasonFocusRequester = remember { FocusRequester() }
+    val episodeFocusRequester = remember { FocusRequester() }
     val episodeListState = rememberLazyListState()
     var focusedEpisodeIndex by remember { mutableStateOf(0) }
     var isSeasonFocused by remember { mutableStateOf(true) }
     
     val currentEpisodes = remember(selectedSeason, episodes) {
         viewModel.getEpisodesForSeason(selectedSeason)
+    }
+    
+    // Get all episodes sorted for next episode lookup
+    val allEpisodesSorted = remember(episodes) {
+        episodes.sortedWith(compareBy({ it.season }, { it.episodeNum }))
+    }
+    
+    // Helper to find next episode (same season or next season)
+    fun getNextEpisode(currentEpisode: Episode): Episode? {
+        val currentIndex = allEpisodesSorted.indexOfFirst { 
+            it.season == currentEpisode.season && it.episodeNum == currentEpisode.episodeNum 
+        }
+        return if (currentIndex >= 0 && currentIndex < allEpisodesSorted.size - 1) {
+            allEpisodesSorted[currentIndex + 1]
+        } else null
     }
     
     LaunchedEffect(seriesId) {
@@ -319,6 +344,7 @@ fun SeriesDetailScreen(
                                     if (currentEpisodes.isNotEmpty()) {
                                         isSeasonFocused = false
                                         focusedEpisodeIndex = 0
+                                        try { episodeFocusRequester.requestFocus() } catch (e: Exception) {}
                                     }
                                     true
                                 }
@@ -386,6 +412,7 @@ fun SeriesDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(DiokkoDimens.spacingSm),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .focusRequester(episodeFocusRequester)
                         .focusable()
                         .onKeyEvent { event ->
                             if (event.type == KeyEventType.KeyDown && !isSeasonFocused) {
@@ -410,7 +437,8 @@ fun SeriesDetailScreen(
                                     Key.Enter, Key.DirectionCenter -> {
                                         if (focusedEpisodeIndex >= 0 && focusedEpisodeIndex < currentEpisodes.size) {
                                             val episode = currentEpisodes[focusedEpisodeIndex]
-                                            onPlayEpisode(episode.streamUrl, "$seriesName - ${episode.name}")
+                                            val nextEpisode = getNextEpisode(episode)
+                                            onPlayEpisode(episode, nextEpisode, seriesName)
                                         }
                                         true
                                     }

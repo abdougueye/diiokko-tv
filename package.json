@@ -1,6 +1,20 @@
 {
+  "name": "diokko-player",
+  "version": "1.0.6",
+  "private": true,
+  "scripts": {
+    "format": "prettier --write .",
+    "install-app": "adb install -r app/build/outputs/apk/debug/app-debug.apk",
+    "uninstall-app": "adb uninstall com.diokko.player.debug",
+    "start-app": "adb shell am start -n com.diokko.player/.player.VideoPlayerActivity",
+    "logcat-clear": "adb logcat -c",
+    "logcat-save": "adb logcat -v time > firetv-crash.log",
+    "logcat": "adb logcat -s ExoPlayer:V *:S",
+    "reboot-device": "adb reboot",
+    "build": "gradlew clean && gradlew assembleDebug",
+    "launch-app": "adb shell monkey -p com.diokko.player.debug -c android.intent.category.LAUNCHER 1"
+  },
   "devDependencies": {
-    "prettier": "^3.7.4",
-    "prettier-plugin-astro": "^0.14.1"
+    "prettier": "^3.7.4"
   }
 }

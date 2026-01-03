@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="600dp"
+    android:height="220dp"
+    android:viewportWidth="600"
+    android:viewportHeight="220">
+
+    <group
+            android:translateX="20"
+            android:translateY="55">
+        <path
+            android:fillColor="url(#streaming-gradient)"
+            android:pathData="M35 25 L75 50 L35 75 V25Z" />
+        <path
+            android:fillColor="url(#streaming-gradient)"
+            android:fillAlpha="0.9"
+            android:strokeAlpha="0.9"
+            android:strokeWidth="1"
+            android:pathData="M85 15 C70 5 55 5 45 10 V18 C52 15 65 15 75 22 L85 15Z" />
+        <path
+            android:fillColor="url(#streaming-gradient)"
+            android:fillAlpha="0.9"
+            android:strokeAlpha="0.9"
+            android:strokeWidth="1"
+            android:pathData="M85 85 C70 95 55 95 45 90 V82 C52 85 65 85 75 78 L85 85Z" />
+        <path
+            android:fillColor="url(#streaming-gradient)"
+            android:fillAlpha="0.7"
+            android:strokeAlpha="0.7"
+            android:strokeWidth="1"
+            android:pathData="M105 0 C80 -10 50 -5 30 10 V20 C45 10 70 8 95 18 L105 0Z" />
+        <path
+            android:fillColor="url(#streaming-gradient)"
+            android:fillAlpha="0.7"
+            android:strokeAlpha="0.7"
+            android:strokeWidth="1"
+            android:pathData="M105 100 C80 110 50 105 30 90 V80 C45 90 70 92 95 82 L105 100Z" />
+    </group>
+    <group
+            android:translateX="130"
+            android:translateY="100">
+    </group>
+</vector>

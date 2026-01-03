@@ -39,7 +39,11 @@ $ adb shell pm list packages
 package:com.diokko.player.debug
 
 # Launches the app by triggering its main launcher activity
-adb shell monkey -p com.diokko.player.debug -c android.intent.category.LAUNCHER 1
+```sh
+adb shell monkey -p com.diokko.player.debug -c android.intent.category.LAUNCHER 1  # send a launch intent like tapping the app icon
+adb shell am start -n com.diokko.player/.player.VideoPlayerActivity
+```
+
 
 
 
@@ -242,4 +246,9 @@ exit
 
 adb pull //sdcard/diokko_database diokko_database.sqlite
 adb shell rm //sdcard/diokko_database
+```
+
+# Show group titles
+```sh
+$ awk -F'group-title="' '{ if (NF>1) { split($2,a,"\""); print a[1] } }' ./playlist.m3u | grep -i adult | sort -u
 ```

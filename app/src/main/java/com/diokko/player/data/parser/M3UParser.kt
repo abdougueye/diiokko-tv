@@ -53,6 +53,43 @@ class M3UParser @Inject constructor() {
         private const val BATCH_SIZE = 5000
         private const val YIELD_INTERVAL = 100000  // Yield less frequently
         private const val BUFFER_SIZE = 262144  // 256KB buffer
+        
+        /**
+         * Blocked group patterns - entries with groups matching these patterns will be skipped.
+         * Patterns are case-insensitive and use simple contains matching for speed.
+         * 
+         * To add a new blocked pattern: add it to this list
+         * To remove a pattern: remove it from this list
+         * 
+         * Examples of patterns:
+         * - "18|" - blocks groups starting with "18|"
+         * - "FOR ADULTS" - blocks groups containing "FOR ADULTS"  
+         * - "XXX" - blocks groups containing "XXX"
+         * - "ADULT" - blocks groups containing "ADULT"
+         */
+        val BLOCKED_GROUP_PATTERNS = listOf(
+            "18|",
+            "FOR ADULTS",
+            "XXX",
+            "ADULT",
+            "PORN",
+            "18+",
+            "+18",
+            "X-RATED",
+            "XRATED"
+        )
+        
+        /**
+         * Check if a group should be blocked based on patterns.
+         * Uses fast case-insensitive contains check.
+         */
+        fun isGroupBlocked(groupTitle: String?): Boolean {
+            if (groupTitle == null) return false
+            val upperGroup = groupTitle.uppercase()
+            return BLOCKED_GROUP_PATTERNS.any { pattern ->
+                upperGroup.contains(pattern.uppercase())
+            }
+        }
     }
 
     /**
@@ -215,6 +252,7 @@ class M3UParser @Inject constructor() {
         var movieCount = 0
         var seriesCount = 0
         var episodeCount = 0
+        var blockedCount = 0  // Count of entries filtered due to blocked groups
         
         // Pre-computed attribute keys for faster extraction
         val TVG_ID_KEY = "tvg-id=\""
@@ -278,8 +316,11 @@ class M3UParser @Inject constructor() {
         
         try {
             var line = reader.readLine()
+            var lastProgressTime = System.currentTimeMillis()
+            
             while (line != null) {
                 lineCount++
+                lastProgressTime = System.currentTimeMillis()
                 
                 // Yield periodically to keep UI responsive
                 if (lineCount % YIELD_INTERVAL == 0) {
@@ -298,10 +339,21 @@ class M3UParser @Inject constructor() {
                 }
                 // Check for URL line (not starting with #)
                 else if (line[0] != '#' && currentExtInf != null) {
-                    // Extract attributes using fast string operations
+                    // Extract group title first for early filtering
+                    val groupTitle = extractAttribute(currentExtInf!!, GROUP_TITLE_KEY) ?: "Other"
+                    
+                    // FAST PATH: Skip blocked groups immediately (adult content filter)
+                    // This check happens before any other processing for maximum efficiency
+                    if (isGroupBlocked(groupTitle)) {
+                        blockedCount++
+                        currentExtInf = null
+                        line = reader.readLine()
+                        continue
+                    }
+                    
+                    // Extract remaining attributes using fast string operations
                     val tvgId = extractAttribute(currentExtInf!!, TVG_ID_KEY)
                     val tvgLogo = extractAttribute(currentExtInf!!, TVG_LOGO_KEY)
-                    val groupTitle = extractAttribute(currentExtInf!!, GROUP_TITLE_KEY) ?: "Other"
                     // Use tvg-name as displayName
                     val displayName = extractAttribute(currentExtInf!!, TVG_NAME_KEY) ?: extractDisplayName(currentExtInf!!)
                     val url = line.trim()
@@ -418,15 +470,38 @@ class M3UParser @Inject constructor() {
             flushBatches(force = true)
             callback.onGroupsFound(allGroups)
             
+        } catch (e: java.net.SocketTimeoutException) {
+            Log.e(TAG, "Parse timeout after $lineCount lines, $entryCount entries: ${e.message}")
+            throw Exception("Connection timed out while loading playlist. Parsed $entryCount entries before timeout. Please try again - the server may be slow.")
+        } catch (e: java.io.InterruptedIOException) {
+            Log.e(TAG, "Parse interrupted after $lineCount lines, $entryCount entries: ${e.message}")
+            throw Exception("Download interrupted after loading $entryCount entries. Please check your network connection and try again.")
+        } catch (e: java.net.SocketException) {
+            Log.e(TAG, "Socket error after $lineCount lines, $entryCount entries: ${e.message}")
+            val message = e.message ?: ""
+            if (message.contains("reset", ignoreCase = true) || message.contains("broken", ignoreCase = true)) {
+                throw Exception("Connection was reset by server after loading $entryCount entries. Please try again.")
+            }
+            throw Exception("Network error while loading playlist: $message")
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "IO error after $lineCount lines, $entryCount entries: ${e.message}")
+            val message = e.message ?: ""
+            if (message.contains("timeout", ignoreCase = true)) {
+                throw Exception("Connection timed out while loading playlist. Parsed $entryCount entries. Please try again.")
+            } else if (message.contains("reset", ignoreCase = true)) {
+                throw Exception("Connection was reset after loading $entryCount entries. Please try again.")
+            }
+            throw Exception("Error reading playlist data: $message")
         } catch (e: Exception) {
-            Log.e(TAG, "Parse error: ${e.message}")
+            Log.e(TAG, "Parse error after $lineCount lines, $entryCount entries: ${e.message}")
             throw e
         } finally {
             try { reader.close() } catch (_: Exception) {}
         }
         
         val elapsed = System.currentTimeMillis() - startTime
-        Log.i(TAG, "Parse complete in ${elapsed}ms: $channelCount channels, $movieCount movies, $seriesCount series, $episodeCount episodes")
+        Log.i(TAG, "Parse complete in ${elapsed}ms: $channelCount channels, $movieCount movies, $seriesCount series, $episodeCount episodes" +
+            if (blockedCount > 0) ", $blockedCount filtered (adult content)" else "")
         
         StreamingParseResult(channelCount, movieCount, seriesCount, allGroups.size)
     }

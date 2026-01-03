@@ -58,9 +58,11 @@ object AppModule {
         }
 
         return OkHttpClient.Builder()
-            .connectTimeout(60, TimeUnit.SECONDS)  // Increased for slow servers
-            .readTimeout(120, TimeUnit.SECONDS)    // Increased for large playlists
+            .connectTimeout(120, TimeUnit.SECONDS)  // 2 min for slow connections
+            .readTimeout(600, TimeUnit.SECONDS)     // 10 min for very large playlists
             .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(900, TimeUnit.SECONDS)     // 15 min overall timeout
+            .retryOnConnectionFailure(true)         // Auto-retry on connection failures
             .addInterceptor(customLogger)
             .addInterceptor(loggingInterceptor)
             .followRedirects(true)

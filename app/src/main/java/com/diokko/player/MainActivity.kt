@@ -425,6 +425,12 @@ fun TvScreenContent(
     var selectedChannelIndex by rememberSaveable { mutableIntStateOf(0) }
     var selectedTimeSlot by rememberSaveable { mutableIntStateOf(0) }
     
+    // Track previous focus level to only trigger on TRANSITION
+    var previousFocusLevel by remember { mutableStateOf(focusLevel) }
+    
+    // Track if search bar has focus
+    var searchBarHasFocus by remember { mutableStateOf(false) }
+    
     // Time slots (30-min intervals, showing 5 slots)
     val timeSlots = remember {
         val calendar = java.util.Calendar.getInstance()
@@ -447,22 +453,24 @@ fun TvScreenContent(
         }
     }
     
-    // Request focus based on focus level with increased delay for reliability
+    // Only request focus when focusLevel TRANSITIONS, not when already there
     LaunchedEffect(focusLevel) {
-        when (focusLevel) {
-            FocusLevel.CATEGORIES -> {
-                kotlinx.coroutines.delay(50)
-                // Scroll to selected category to ensure it's visible
-                if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-                    categoryListState.animateScrollToItem(selectedCategoryIndex)
+        if (focusLevel != previousFocusLevel) {
+            when (focusLevel) {
+                FocusLevel.CATEGORIES -> {
+                    kotlinx.coroutines.delay(50)
+                    if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
+                        categoryListState.animateScrollToItem(selectedCategoryIndex)
+                    }
+                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
                 }
-                try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                FocusLevel.CONTENT -> {
+                    kotlinx.coroutines.delay(100)
+                    try { epgFocusRequester.requestFocus() } catch (e: Exception) {}
+                }
+                else -> {}
             }
-            FocusLevel.CONTENT -> {
-                kotlinx.coroutines.delay(100)
-                try { epgFocusRequester.requestFocus() } catch (e: Exception) {}
-            }
-            else -> {}
+            previousFocusLevel = focusLevel
         }
     }
     
@@ -476,6 +484,13 @@ fun TvScreenContent(
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchFocusRequester = remember { FocusRequester() }
+    
+    // Reset channel index when channels list changes (e.g., after search)
+    LaunchedEffect(channels) {
+        if (selectedChannelIndex >= channels.size) {
+            selectedChannelIndex = 0
+        }
+    }
     
     LaunchedEffect(selectedCategoryIndex, categories) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
@@ -524,12 +539,19 @@ fun TvScreenContent(
                 onQueryChange = { viewModel.updateSearchQuery(it) },
                 onClear = { viewModel.clearSearch() },
                 onNavigateDown = {
-                    // Return focus to categories
-                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    // Navigate to content grid (EPG) where search results are shown
+                    searchBarHasFocus = false
+                    if (channels.isNotEmpty()) {
+                        onFocusLevelChange(FocusLevel.CONTENT)
+                    } else {
+                        try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    }
                 },
                 categoryName = if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) 
                     categories[selectedCategoryIndex].name else null,
-                modifier = Modifier.width(250.dp),
+                modifier = Modifier
+                    .width(250.dp)
+                    .onFocusChanged { searchBarHasFocus = it.isFocused },
                 focusRequester = searchFocusRequester
             )
             
@@ -606,6 +628,11 @@ fun TvScreenContent(
                                             if (channels.isNotEmpty()) {
                                                 onFocusLevelChange(FocusLevel.CONTENT)
                                             }
+                                            true
+                                        }
+                                        // Menu key shortcut to jump to search from any category
+                                        Key.Menu -> {
+                                            try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
                                             true
                                         }
                                         else -> false
@@ -716,6 +743,7 @@ fun TvScreenContent(
                                                     true
                                                 } else {
                                                     // At top of content, jump to search bar
+                                                    onFocusLevelChange(FocusLevel.CATEGORIES)
                                                     try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
                                                     true
                                                 }
@@ -884,6 +912,9 @@ fun MoviesScreenContent(
     // Track if initial load is done
     var initialLoadDone by remember { mutableStateOf(false) }
     
+    // Track if search bar has focus (to prevent category focus from stealing it)
+    var searchBarHasFocus by remember { mutableStateOf(false) }
+    
     // Load movies only once when screen first appears
     LaunchedEffect(Unit) {
         if (movies.isEmpty() && categories.isEmpty()) {
@@ -892,15 +923,18 @@ fun MoviesScreenContent(
     }
     
     // Request focus with increased delay for reliability
-    LaunchedEffect(focusLevel) {
+    // Only request category focus if search bar doesn't have focus
+    LaunchedEffect(focusLevel, searchBarHasFocus) {
         when (focusLevel) {
             FocusLevel.CATEGORIES -> {
-                kotlinx.coroutines.delay(50)
-                // Scroll to selected category to ensure it's visible
-                if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-                    categoryListState.animateScrollToItem(selectedCategoryIndex)
+                if (!searchBarHasFocus) {
+                    kotlinx.coroutines.delay(50)
+                    // Scroll to selected category to ensure it's visible
+                    if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
+                        categoryListState.animateScrollToItem(selectedCategoryIndex)
+                    }
+                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
                 }
-                try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
             }
             FocusLevel.CONTENT -> {
                 kotlinx.coroutines.delay(100)
@@ -913,6 +947,13 @@ fun MoviesScreenContent(
     LaunchedEffect(selectedCategoryIndex) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
             categoryListState.animateScrollToItem(selectedCategoryIndex)
+        }
+    }
+    
+    // Reset focused index when movies list changes (e.g., after search)
+    LaunchedEffect(movies) {
+        if (contentFocusedIndex >= movies.size) {
+            contentFocusedIndex = 0
         }
     }
     
@@ -975,12 +1016,19 @@ fun MoviesScreenContent(
                 onQueryChange = { viewModel.updateSearchQuery(it) },
                 onClear = { viewModel.clearSearch() },
                 onNavigateDown = {
-                    // Return focus to categories
-                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    // Navigate to content grid where search results are shown
+                    searchBarHasFocus = false
+                    if (movies.isNotEmpty()) {
+                        onFocusLevelChange(FocusLevel.CONTENT)
+                    } else {
+                        try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    }
                 },
                 categoryName = if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) 
                     categories[selectedCategoryIndex].name else null,
-                modifier = Modifier.width(250.dp),
+                modifier = Modifier
+                    .width(250.dp)
+                    .onFocusChanged { searchBarHasFocus = it.isFocused },
                 focusRequester = searchFocusRequester
             )
             
@@ -1059,6 +1107,11 @@ fun MoviesScreenContent(
                                             }
                                             true
                                         }
+                                        // Menu key shortcut to jump to search from any category
+                                        Key.Menu -> {
+                                            try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
+                                            true
+                                        }
                                         else -> false
                                     }
                                 } else false
@@ -1134,6 +1187,7 @@ fun MoviesScreenContent(
                                                     true
                                                 } else {
                                                     // At top row of content, jump to search bar
+                                                    onFocusLevelChange(FocusLevel.CATEGORIES)
                                                     try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
                                                     true
                                                 }
@@ -1221,6 +1275,9 @@ fun ShowsScreenContent(
     // Track if initial load is done
     var initialLoadDone by remember { mutableStateOf(false) }
     
+    // Track if search bar has focus (to prevent category focus from stealing it)
+    var searchBarHasFocus by remember { mutableStateOf(false) }
+    
     // Load series only once when screen first appears
     LaunchedEffect(Unit) {
         if (series.isEmpty() && categories.isEmpty()) {
@@ -1229,15 +1286,18 @@ fun ShowsScreenContent(
     }
     
     // Request focus with increased delay for reliability
-    LaunchedEffect(focusLevel) {
+    // Only request category focus if search bar doesn't have focus
+    LaunchedEffect(focusLevel, searchBarHasFocus) {
         when (focusLevel) {
             FocusLevel.CATEGORIES -> {
-                kotlinx.coroutines.delay(50)
-                // Scroll to selected category to ensure it's visible
-                if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-                    categoryListState.animateScrollToItem(selectedCategoryIndex)
+                if (!searchBarHasFocus) {
+                    kotlinx.coroutines.delay(50)
+                    // Scroll to selected category to ensure it's visible
+                    if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
+                        categoryListState.animateScrollToItem(selectedCategoryIndex)
+                    }
+                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
                 }
-                try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
             }
             FocusLevel.CONTENT -> {
                 kotlinx.coroutines.delay(100)
@@ -1250,6 +1310,13 @@ fun ShowsScreenContent(
     LaunchedEffect(selectedCategoryIndex) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
             categoryListState.animateScrollToItem(selectedCategoryIndex)
+        }
+    }
+    
+    // Reset focused index when series list changes (e.g., after search)
+    LaunchedEffect(series) {
+        if (contentFocusedIndex >= series.size) {
+            contentFocusedIndex = 0
         }
     }
     
@@ -1312,12 +1379,19 @@ fun ShowsScreenContent(
                 onQueryChange = { viewModel.updateSearchQuery(it) },
                 onClear = { viewModel.clearSearch() },
                 onNavigateDown = {
-                    // Return focus to categories
-                    try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    // Navigate to content grid where search results are shown
+                    searchBarHasFocus = false
+                    if (series.isNotEmpty()) {
+                        onFocusLevelChange(FocusLevel.CONTENT)
+                    } else {
+                        try { categoryFocusRequester.requestFocus() } catch (e: Exception) {}
+                    }
                 },
                 categoryName = if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) 
                     categories[selectedCategoryIndex].name else null,
-                modifier = Modifier.width(250.dp),
+                modifier = Modifier
+                    .width(250.dp)
+                    .onFocusChanged { searchBarHasFocus = it.isFocused },
                 focusRequester = searchFocusRequester
             )
             
@@ -1396,6 +1470,11 @@ fun ShowsScreenContent(
                                             }
                                             true
                                         }
+                                        // Menu key shortcut to jump to search from any category
+                                        Key.Menu -> {
+                                            try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
+                                            true
+                                        }
                                         else -> false
                                     }
                                 } else false
@@ -1471,6 +1550,7 @@ fun ShowsScreenContent(
                                                     true
                                                 } else {
                                                     // At top row of content, jump to search bar
+                                                    onFocusLevelChange(FocusLevel.CATEGORIES)
                                                     try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
                                                     true
                                                 }
@@ -1665,11 +1745,24 @@ fun GlobalSearchScreen(
     val isSearching by viewModel.isSearching.collectAsState()
     
     val searchFocusRequester = remember { FocusRequester() }
-    val firstResultFocusRequester = remember { FocusRequester() }
     val resultsListState = rememberLazyListState()
     
-    // Track if search bar has focus
-    var isSearchBarFocused by remember { mutableStateOf(true) }
+    // Focus state: 0 = search bar, 1+ = result index (1-based)
+    var focusIndex by remember { mutableIntStateOf(0) }
+    
+    // Build flat list of all results for navigation
+    val allResults = remember(searchResults) {
+        buildList {
+            searchResults.channels.take(10).forEach { add(Triple("channel", it, Unit)) }
+            searchResults.movies.take(10).forEach { add(Triple("movie", it, Unit)) }
+            searchResults.series.take(10).forEach { add(Triple("series", it, Unit)) }
+        }
+    }
+    
+    // Reset focus index when results change
+    LaunchedEffect(allResults) {
+        focusIndex = 0
+    }
     
     // Request focus on search bar when screen loads
     LaunchedEffect(Unit) {
@@ -1677,10 +1770,63 @@ fun GlobalSearchScreen(
         try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
     }
     
+    // Scroll to selected result
+    LaunchedEffect(focusIndex) {
+        if (focusIndex > 0 && focusIndex <= allResults.size) {
+            // Account for headers
+            val channelCount = searchResults.channels.take(10).size
+            val movieCount = searchResults.movies.take(10).size
+            val actualIndex = focusIndex - 1
+            val scrollIndex = actualIndex + 
+                1 + // Channel header
+                (if (actualIndex >= channelCount && movieCount > 0) 2 else 0) + // Movie header + spacer
+                (if (actualIndex >= channelCount + movieCount && searchResults.series.isNotEmpty()) 2 else 0) // Series header + spacer
+            resultsListState.animateScrollToItem(scrollIndex.coerceIn(0, maxOf(0, resultsListState.layoutInfo.totalItemsCount - 1)))
+        }
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(DiokkoDimens.spacingMd)
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.DirectionDown -> {
+                            if (focusIndex == 0 && allResults.isNotEmpty()) {
+                                focusIndex = 1
+                                true
+                            } else if (focusIndex > 0 && focusIndex < allResults.size) {
+                                focusIndex++
+                                true
+                            } else false
+                        }
+                        Key.DirectionUp -> {
+                            if (focusIndex > 1) {
+                                focusIndex--
+                                true
+                            } else if (focusIndex == 1) {
+                                focusIndex = 0
+                                try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
+                                true
+                            } else false
+                        }
+                        Key.Enter, Key.DirectionCenter -> {
+                            if (focusIndex > 0 && focusIndex <= allResults.size) {
+                                val (type, item, _) = allResults[focusIndex - 1]
+                                when (type) {
+                                    "channel" -> onChannelClick(item as com.diokko.player.data.models.Channel)
+                                    "movie" -> onMovieClick(item as com.diokko.player.data.models.Movie)
+                                    "series" -> onSeriesClick(item as com.diokko.player.data.models.Series)
+                                }
+                                true
+                            } else false
+                        }
+                        else -> false
+                    }
+                } else false
+            }
+            .focusable()
     ) {
         // Title
         Row(
@@ -1698,22 +1844,19 @@ fun GlobalSearchScreen(
         
         Spacer(modifier = Modifier.height(DiokkoDimens.spacingMd))
         
-        // Search bar with focus tracking
+        // Search bar
         com.diokko.player.ui.components.TvSearchBar(
             query = searchQuery,
             onQueryChange = { viewModel.updateQuery(it) },
             onSearch = { },
             onClear = { viewModel.clearSearch() },
             onNavigateDown = {
-                // Move focus to first result if results exist
-                if (!searchResults.isEmpty) {
-                    try { firstResultFocusRequester.requestFocus() } catch (e: Exception) {}
+                if (allResults.isNotEmpty()) {
+                    focusIndex = 1
                 }
             },
             placeholder = "Search channels, movies, shows...",
-            modifier = Modifier
-                .fillMaxWidth()
-                .onFocusChanged { isSearchBarFocused = it.isFocused },
+            modifier = Modifier.fillMaxWidth(),
             focusRequester = searchFocusRequester
         )
         
@@ -1732,7 +1875,6 @@ fun GlobalSearchScreen(
                 )
             }
         } else if (searchQuery.isBlank()) {
-            // Empty state - show hint
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -1754,22 +1896,18 @@ fun GlobalSearchScreen(
                 }
             }
         } else if (searchResults.isEmpty) {
-            // No results
             com.diokko.player.ui.components.EmptySearchResults(
                 query = searchQuery,
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            // Determine which section has the first item
-            val firstSectionIsChannels = searchResults.channels.isNotEmpty()
-            val firstSectionIsMovies = !firstSectionIsChannels && searchResults.movies.isNotEmpty()
-            val firstSectionIsSeries = !firstSectionIsChannels && !firstSectionIsMovies && searchResults.series.isNotEmpty()
+            // Results list
+            var currentGlobalIndex = 0
             
-            // Show grouped results with proper TV focus
             LazyColumn(
                 state = resultsListState,
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(DiokkoDimens.spacingSm)
+                verticalArrangement = Arrangement.spacedBy(DiokkoDimens.spacingXs)
             ) {
                 // Channels section
                 if (searchResults.channels.isNotEmpty()) {
@@ -1780,15 +1918,14 @@ fun GlobalSearchScreen(
                             emoji = "📺"
                         )
                     }
-                    itemsIndexed(searchResults.channels.take(10)) { index, channel ->
-                        FocusableResultItem(
+                    items(searchResults.channels.take(10).size) { index ->
+                        val channel = searchResults.channels[index]
+                        val itemIndex = index + 1
+                        SearchResultRow(
                             title = channel.name,
                             subtitle = channel.groupTitle ?: "",
                             emoji = "📺",
-                            onClick = { onChannelClick(channel) },
-                            isFirstItem = firstSectionIsChannels && index == 0,
-                            searchFocusRequester = searchFocusRequester,
-                            selfFocusRequester = if (firstSectionIsChannels && index == 0) firstResultFocusRequester else null
+                            isSelected = focusIndex == itemIndex
                         )
                     }
                 }
@@ -1803,15 +1940,15 @@ fun GlobalSearchScreen(
                             emoji = "🎬"
                         )
                     }
-                    itemsIndexed(searchResults.movies.take(10)) { index, movie ->
-                        FocusableResultItem(
+                    val channelCount = searchResults.channels.take(10).size
+                    items(searchResults.movies.take(10).size) { index ->
+                        val movie = searchResults.movies[index]
+                        val itemIndex = channelCount + index + 1
+                        SearchResultRow(
                             title = movie.name,
                             subtitle = movie.genre ?: "",
                             emoji = "🎬",
-                            onClick = { onMovieClick(movie) },
-                            isFirstItem = firstSectionIsMovies && index == 0,
-                            searchFocusRequester = searchFocusRequester,
-                            selfFocusRequester = if (firstSectionIsMovies && index == 0) firstResultFocusRequester else null
+                            isSelected = focusIndex == itemIndex
                         )
                     }
                 }
@@ -1826,15 +1963,16 @@ fun GlobalSearchScreen(
                             emoji = "📺"
                         )
                     }
-                    itemsIndexed(searchResults.series.take(10)) { index, series ->
-                        FocusableResultItem(
+                    val channelCount = searchResults.channels.take(10).size
+                    val movieCount = searchResults.movies.take(10).size
+                    items(searchResults.series.take(10).size) { index ->
+                        val series = searchResults.series[index]
+                        val itemIndex = channelCount + movieCount + index + 1
+                        SearchResultRow(
                             title = series.name,
                             subtitle = series.genre ?: "",
                             emoji = "📺",
-                            onClick = { onSeriesClick(series) },
-                            isFirstItem = firstSectionIsSeries && index == 0,
-                            searchFocusRequester = searchFocusRequester,
-                            selfFocusRequester = if (firstSectionIsSeries && index == 0) firstResultFocusRequester else null
+                            isSelected = focusIndex == itemIndex
                         )
                     }
                 }
@@ -1844,56 +1982,29 @@ fun GlobalSearchScreen(
 }
 
 /**
- * Focusable search result item for TV navigation
+ * Simple search result row (non-focusable, selection handled by parent)
  */
 @Composable
-fun FocusableResultItem(
+fun SearchResultRow(
     title: String,
     subtitle: String,
     emoji: String,
-    onClick: () -> Unit,
-    isFirstItem: Boolean = false,
-    searchFocusRequester: FocusRequester? = null,
-    selfFocusRequester: FocusRequester? = null
+    isSelected: Boolean
 ) {
-    var isFocused by remember { mutableStateOf(false) }
-    val itemFocusRequester = selfFocusRequester ?: remember { FocusRequester() }
-    
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(56.dp)
             .clip(DiokkoShapes.small)
             .background(
-                if (isFocused) DiokkoColors.Accent 
+                if (isSelected) DiokkoColors.Accent 
                 else DiokkoColors.Surface
             )
             .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = if (isFocused) DiokkoColors.AccentLight else Color.Transparent,
+                width = if (isSelected) 2.dp else 0.dp,
+                color = if (isSelected) DiokkoColors.AccentLight else Color.Transparent,
                 shape = DiokkoShapes.small
             )
-            .focusRequester(itemFocusRequester)
-            .focusable()
-            .onFocusChanged { isFocused = it.isFocused }
-            .onKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown) {
-                    when (event.key) {
-                        Key.Enter, Key.DirectionCenter -> {
-                            onClick()
-                            true
-                        }
-                        Key.DirectionUp -> {
-                            // Only navigate to search bar if this is the first item
-                            if (isFirstItem && searchFocusRequester != null) {
-                                try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
-                                true
-                            } else false
-                        }
-                        else -> false
-                    }
-                } else false
-            }
             .padding(horizontal = DiokkoDimens.spacingMd),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1903,7 +2014,7 @@ fun FocusableResultItem(
             Text(
                 text = title,
                 style = DiokkoTypography.bodyMedium,
-                color = if (isFocused) DiokkoColors.TextOnAccent else DiokkoColors.TextPrimary,
+                color = if (isSelected) DiokkoColors.TextOnAccent else DiokkoColors.TextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -1911,7 +2022,7 @@ fun FocusableResultItem(
                 Text(
                     text = subtitle,
                     style = DiokkoTypography.bodySmall,
-                    color = if (isFocused) DiokkoColors.TextOnAccent.copy(alpha = 0.7f) else DiokkoColors.TextSecondary,
+                    color = if (isSelected) DiokkoColors.TextOnAccent.copy(alpha = 0.7f) else DiokkoColors.TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
