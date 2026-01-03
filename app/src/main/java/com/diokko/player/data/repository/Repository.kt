@@ -1,16 +1,20 @@
 package com.diokko.player.data.repository
 
+import android.content.Context
 import android.util.Log
 import com.diokko.player.data.database.*
 import com.diokko.player.data.models.*
 import com.diokko.player.data.parser.M3UParser
 import com.diokko.player.data.parser.XtreamCodesApi
 import com.diokko.player.data.parser.XtreamContentConverter
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.File
+import java.io.FileInputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,6 +29,7 @@ private fun logE(msg: String, e: Throwable? = null) = if (e != null) Log.e(TAG, 
  */
 @Singleton
 class PlaylistRepository @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val playlistDao: PlaylistDao,
     private val categoryDao: CategoryDao,
     private val channelDao: ChannelDao,
@@ -179,6 +184,50 @@ class PlaylistRepository @Inject constructor(
             throw Exception("Invalid URL: must start with http:// or https://")
         }
         
+        // Retry wrapper for connection reset errors during parsing
+        val maxRetries = 3
+        var lastParseException: Exception? = null
+        
+        for (parseAttempt in 1..maxRetries) {
+            try {
+                if (parseAttempt > 1) {
+                    logW("=== RETRY ATTEMPT $parseAttempt of $maxRetries ===")
+                    // Clear any partial data from previous attempt
+                    channelDao.deleteChannelsForPlaylist(playlist.id)
+                    movieDao.deleteMoviesForPlaylist(playlist.id)
+                    seriesDao.deleteSeriesForPlaylist(playlist.id)
+                    categoryDao.deleteCategoriesForPlaylist(playlist.id)
+                    episodeDao.deleteEpisodesForPlaylist(playlist.id)
+                    // Wait before retry with exponential backoff
+                    val delay = 3000L * parseAttempt
+                    logW("Waiting ${delay}ms before retry...")
+                    kotlinx.coroutines.delay(delay)
+                }
+                
+                doRefreshM3UPlaylist(playlist, url)
+                return // Success! Exit the retry loop
+                
+            } catch (e: Exception) {
+                val message = e.message ?: ""
+                val isRetryable = message.contains("reset", ignoreCase = true) ||
+                                  message.contains("timeout", ignoreCase = true) ||
+                                  message.contains("interrupted", ignoreCase = true) ||
+                                  message.contains("broken", ignoreCase = true)
+                
+                if (isRetryable && parseAttempt < maxRetries) {
+                    logW("Retryable error on attempt $parseAttempt: ${e.message}")
+                    lastParseException = e
+                    continue
+                } else {
+                    throw e
+                }
+            }
+        }
+        
+        throw lastParseException ?: Exception("Failed after $maxRetries attempts")
+    }
+    
+    private suspend fun doRefreshM3UPlaylist(playlist: Playlist, url: String) {
         // Try with different User-Agents if we get errors
         val userAgents = listOf(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -251,13 +300,36 @@ class PlaylistRepository @Inject constructor(
             } catch (e: java.net.SocketTimeoutException) {
                 logE("Connection timeout", e)
                 lastException = Exception("Connection timed out. The server is not responding.")
+                kotlinx.coroutines.delay(1000) // Wait before retry
                 continue
             } catch (e: javax.net.ssl.SSLException) {
                 logE("SSL error", e)
                 throw Exception("SSL/Security error: ${e.message}")
+            } catch (e: java.net.SocketException) {
+                // Specific handling for connection reset
+                val message = e.message ?: ""
+                logE("Socket error: $message", e)
+                if (message.contains("reset", ignoreCase = true) || 
+                    message.contains("broken pipe", ignoreCase = true) ||
+                    message.contains("connection abort", ignoreCase = true)) {
+                    lastException = Exception("Connection was reset by server. This may be due to server load or network issues. Please try again.")
+                    kotlinx.coroutines.delay(2000) // Longer wait for connection reset
+                } else {
+                    lastException = Exception("Network connection error: $message")
+                }
+                continue
             } catch (e: java.io.IOException) {
-                logE("Network error", e)
-                lastException = Exception("Network error: ${e.message}")
+                val message = e.message ?: ""
+                logE("Network error: $message", e)
+                // Check if this is a connection reset wrapped in IOException
+                if (message.contains("reset", ignoreCase = true) ||
+                    message.contains("broken pipe", ignoreCase = true)) {
+                    lastException = Exception("Connection was reset by server. This may be due to server load or network issues. Please try again.")
+                    kotlinx.coroutines.delay(2000)
+                } else {
+                    lastException = Exception("Network error: $message")
+                    kotlinx.coroutines.delay(1000)
+                }
                 continue
             }
         }
@@ -283,19 +355,59 @@ class PlaylistRepository @Inject constructor(
             throw Exception(errorMessage)
         }
         
-        // Use streaming parser with direct database insertion
-        logW("Starting streaming parse with direct database insertion...")
+        // ========================================
+        // PHASE 1: Download file to cache first
+        // This separates downloading from parsing to prevent
+        // buffer overflow and connection resets on FireTV
+        // ========================================
         val contentLength = successResponse.header("Content-Length")?.toLongOrNull() ?: -1
-        logW("Content-Length: $contentLength bytes")
+        logW("Content-Length: $contentLength bytes (${contentLength / 1024 / 1024}MB)")
         
-        // Create category map for group -> categoryId mapping
-        val categoryMap = mutableMapOf<String, Long>()
-        var categoryOrder = 0
+        val cacheFile = File(context.cacheDir, "playlist_${playlist.id}.m3u")
+        logW("Downloading to cache: ${cacheFile.absolutePath}")
         
-        val parseResult = successResponse.use { response ->
-            val body = response.body ?: throw Exception("Empty response from server")
+        try {
+            val downloadStartTime = System.currentTimeMillis()
+            var bytesDownloaded = 0L
             
-            body.byteStream().use { inputStream ->
+            successResponse.use { response ->
+                val body = response.body ?: throw Exception("Empty response from server")
+                
+                cacheFile.outputStream().buffered(8192).use { output ->
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(8192)
+                        var bytesRead: Int
+                        var lastProgressLog = 0L
+                        
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            bytesDownloaded += bytesRead
+                            
+                            // Log progress every 10MB
+                            if (bytesDownloaded - lastProgressLog > 10 * 1024 * 1024) {
+                                val percent = if (contentLength > 0) (bytesDownloaded * 100 / contentLength) else 0
+                                logW("Download progress: ${bytesDownloaded / 1024 / 1024}MB ($percent%)")
+                                lastProgressLog = bytesDownloaded
+                            }
+                        }
+                    }
+                }
+            }
+            
+            val downloadTime = System.currentTimeMillis() - downloadStartTime
+            logW("Download complete: ${bytesDownloaded / 1024 / 1024}MB in ${downloadTime / 1000}s")
+            
+            // ========================================
+            // PHASE 2: Parse from local file
+            // Network connection is now closed, no timeout risk
+            // ========================================
+            logW("Starting parse from local cache file...")
+            
+            // Create category map for group -> categoryId mapping
+            val categoryMap = mutableMapOf<String, Long>()
+            var categoryOrder = 0
+            
+            val parseResult = FileInputStream(cacheFile).use { inputStream ->
                 m3uParser.parseStreaming(inputStream, playlist.id, object : M3UParser.ParseCallback {
                     override suspend fun onChannelBatch(channels: List<Channel>) {
                         // Assign category IDs to channels
@@ -376,13 +488,26 @@ class PlaylistRepository @Inject constructor(
                     }
                 })
             }
+            
+            logW("=== Refresh Complete ===")
+            logW("Channels: ${parseResult.channelCount}")
+            logW("Movies: ${parseResult.movieCount}")
+            logW("Series: ${parseResult.seriesCount}")
+            logW("Categories: ${categoryMap.size}")
+            
+        } finally {
+            // ========================================
+            // PHASE 3: Clean up cache file
+            // ========================================
+            try {
+                if (cacheFile.exists()) {
+                    cacheFile.delete()
+                    logW("Cache file cleaned up")
+                }
+            } catch (e: Exception) {
+                logE("Failed to delete cache file", e)
+            }
         }
-        
-        logW("=== Refresh Complete ===")
-        logW("Channels: ${parseResult.channelCount}")
-        logW("Movies: ${parseResult.movieCount}")
-        logW("Series: ${parseResult.seriesCount}")
-        logW("Categories: ${categoryMap.size}")
     }
     
     private suspend fun refreshXtreamPlaylist(playlist: Playlist) {

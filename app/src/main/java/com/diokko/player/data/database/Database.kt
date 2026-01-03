@@ -68,6 +68,7 @@ interface CategoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCategory(category: Category): Long
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCategories(categories: List<Category>)
 
@@ -116,6 +117,7 @@ interface ChannelDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChannel(channel: Channel): Long
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChannels(channels: List<Channel>)
 
@@ -179,6 +181,7 @@ interface MovieDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovie(movie: Movie): Long
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovies(movies: List<Movie>)
 
@@ -239,6 +242,7 @@ interface SeriesDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSeries(series: Series): Long
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSeriesList(seriesList: List<Series>)
 
@@ -275,6 +279,7 @@ interface EpisodeDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEpisode(episode: Episode): Long
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEpisodes(episodes: List<Episode>)
 
@@ -289,6 +294,9 @@ interface EpisodeDao {
 
     @Query("DELETE FROM episodes WHERE seriesId = :seriesId")
     suspend fun deleteEpisodesForSeries(seriesId: Long)
+    
+    @Query("DELETE FROM episodes WHERE seriesId IN (SELECT id FROM series WHERE playlistId = :playlistId)")
+    suspend fun deleteEpisodesForPlaylist(playlistId: Long)
 }
 
 /**
@@ -305,6 +313,7 @@ interface EpgDao {
     @Query("SELECT * FROM epg_programs WHERE channelId = :channelId AND startTime > :currentTime ORDER BY startTime ASC LIMIT 1")
     suspend fun getNextProgram(channelId: Long, currentTime: Long): EpgProgram?
 
+    @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPrograms(programs: List<EpgProgram>)
 

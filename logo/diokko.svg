@@ -1,0 +1,35 @@
+<svg width="600" height="220" viewBox="0 0 600 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <linearGradient id="streaming-gradient" x1="0" y1="20" x2="120" y2="130" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#ff69b4"/>
+            <stop offset="1" stop-color="#003366"/>
+        </linearGradient>
+        <filter id="soft-shadow" x="-10%" y="-10%" width="120%" height="120%">
+            <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+            <feOffset dx="1" dy="2" result="offsetblur"/>
+            <feComponentTransfer>
+                <feFuncA type="linear" slope="0.3"/>
+            </feComponentTransfer>
+            <feMerge>
+                <feMergeNode/>
+                <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+        </filter>
+    </defs>
+
+    <g filter="url(#soft-shadow)">
+        <g transform="translate(20, 55)">
+            <path d="M35 25 L75 50 L35 75 V25Z" fill="url(#streaming-gradient)"/>
+            <path d="M85 15 C70 5 55 5 45 10 V18 C52 15 65 15 75 22 L85 15Z" fill="url(#streaming-gradient)" opacity="0.9"/>
+             <path d="M85 85 C70 95 55 95 45 90 V82 C52 85 65 85 75 78 L85 85Z" fill="url(#streaming-gradient)" opacity="0.9"/>
+            <path d="M105 0 C80 -10 50 -5 30 10 V20 C45 10 70 8 95 18 L105 0Z" fill="url(#streaming-gradient)" opacity="0.7"/>
+            <path d="M105 100 C80 110 50 105 30 90 V80 C45 90 70 92 95 82 L105 100Z" fill="url(#streaming-gradient)" opacity="0.7"/>
+        </g>
+
+        <g font-family="'Inter', 'Roboto', 'Helvetica Neue', sans-serif" transform="translate(130, 100)">
+            <text font-weight="800" font-size="72" fill="#ff69b4" letter-spacing="-1">Diokko</text>
+            
+            <text font-weight="800" font-size="72" fill="#2871baff" x="40" y="60" letter-spacing="-1">Player</text>
+        </g>
+    </g>
+</svg>

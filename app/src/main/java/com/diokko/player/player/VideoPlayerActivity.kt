@@ -1,5 +1,6 @@
 package com.diokko.player.player
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -49,6 +50,15 @@ class VideoPlayerActivity : ComponentActivity() {
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_CHANNEL_ID = "extra_channel_id"
         const val EXTRA_START_POSITION = "extra_start_position"
+        // Content type: "LIVE_TV", "MOVIE", "SERIES"
+        const val EXTRA_CONTENT_TYPE = "extra_content_type"
+        // Episode info for series
+        const val EXTRA_SERIES_ID = "extra_series_id"
+        const val EXTRA_SEASON = "extra_season"
+        const val EXTRA_EPISODE_NUM = "extra_episode_num"
+        // Next episode info (pre-computed)
+        const val EXTRA_NEXT_EPISODE_URL = "extra_next_episode_url"
+        const val EXTRA_NEXT_EPISODE_TITLE = "extra_next_episode_title"
     }
     
     private var player: ExoPlayer? = null
@@ -69,6 +79,9 @@ class VideoPlayerActivity : ComponentActivity() {
         }
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "Unknown"
         val startPosition = intent.getLongExtra(EXTRA_START_POSITION, 0L)
+        val contentType = intent.getStringExtra(EXTRA_CONTENT_TYPE) ?: "LIVE_TV"
+        val nextEpisodeUrl = intent.getStringExtra(EXTRA_NEXT_EPISODE_URL)
+        val nextEpisodeTitle = intent.getStringExtra(EXTRA_NEXT_EPISODE_TITLE)
         
         setContent {
             DiokkoPlayerTheme {
@@ -76,7 +89,20 @@ class VideoPlayerActivity : ComponentActivity() {
                     url = url,
                     title = title,
                     startPosition = startPosition,
+                    contentType = contentType,
+                    nextEpisodeUrl = nextEpisodeUrl,
+                    nextEpisodeTitle = nextEpisodeTitle,
                     onBack = { finish() },
+                    onPlayNext = { nextUrl, nextTitle ->
+                        // Start new activity for next episode
+                        val nextIntent = Intent(this, VideoPlayerActivity::class.java).apply {
+                            putExtra(EXTRA_URL, nextUrl)
+                            putExtra(EXTRA_TITLE, nextTitle)
+                            putExtra(EXTRA_CONTENT_TYPE, "SERIES")
+                        }
+                        startActivity(nextIntent)
+                        finish()
+                    },
                     onPlayerReady = { exoPlayer -> player = exoPlayer }
                 )
             }
@@ -106,7 +132,11 @@ fun VideoPlayerScreen(
     url: String,
     title: String,
     startPosition: Long,
+    contentType: String = "LIVE_TV",
+    nextEpisodeUrl: String? = null,
+    nextEpisodeTitle: String? = null,
     onBack: () -> Unit,
+    onPlayNext: (String, String) -> Unit = { _, _ -> },
     onPlayerReady: (ExoPlayer) -> Unit
 ) {
     val context = LocalContext.current
@@ -118,6 +148,18 @@ fun VideoPlayerScreen(
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
+    var playbackEnded by remember { mutableStateOf(false) }
+    
+    // Show "Next Episode" button when 15 seconds before end
+    val showNextButton = nextEpisodeUrl != null && 
+                         duration > 0 && 
+                         currentPosition > 0 &&
+                         (duration - currentPosition) <= 15000 &&
+                         !playbackEnded
+    
+    // Countdown for auto-play
+    var autoPlayCountdown by remember { mutableIntStateOf(10) }
+    var autoPlayCancelled by remember { mutableStateOf(false) }
     
     val player = remember {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -159,6 +201,9 @@ fun VideoPlayerScreen(
                         if (state == Player.STATE_READY) {
                             duration = this@apply.duration
                         }
+                        if (state == Player.STATE_ENDED) {
+                            playbackEnded = true
+                        }
                     }
                     
                     override fun onIsPlayingChanged(playing: Boolean) {
@@ -170,6 +215,36 @@ fun VideoPlayerScreen(
                     }
                 })
             }
+    }
+    
+    // Handle playback ended
+    LaunchedEffect(playbackEnded) {
+        if (playbackEnded && !autoPlayCancelled) {
+            when (contentType) {
+                "MOVIE" -> {
+                    // For movies, go back to previous screen
+                    delay(2000) // Brief delay before going back
+                    onBack()
+                }
+                "SERIES" -> {
+                    // For series with next episode, start countdown
+                    if (nextEpisodeUrl != null && nextEpisodeTitle != null) {
+                        while (autoPlayCountdown > 0 && !autoPlayCancelled) {
+                            delay(1000)
+                            autoPlayCountdown--
+                        }
+                        if (!autoPlayCancelled && autoPlayCountdown <= 0) {
+                            onPlayNext(nextEpisodeUrl, nextEpisodeTitle)
+                        }
+                    } else {
+                        // No next episode, go back
+                        delay(2000)
+                        onBack()
+                    }
+                }
+                // LIVE_TV - do nothing special
+            }
+        }
     }
     
     LaunchedEffect(player) {
@@ -296,6 +371,154 @@ fun VideoPlayerScreen(
             }
         }
         
+        // Next Episode button (shows 15 seconds before end)
+        AnimatedVisibility(
+            visible = showNextButton && error == null,
+            enter = fadeIn() + slideInHorizontally { it },
+            exit = fadeOut() + slideOutHorizontally { it },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(32.dp)
+        ) {
+            Button(
+                onClick = {
+                    if (nextEpisodeUrl != null && nextEpisodeTitle != null) {
+                        onPlayNext(nextEpisodeUrl, nextEpisodeTitle)
+                    }
+                },
+                colors = ButtonDefaults.colors(
+                    containerColor = DiokkoColors.Accent
+                ),
+                modifier = Modifier.focusable()
+            ) {
+                Text("Next Episode ▶▶")
+            }
+        }
+        
+        // Playback ended overlay with countdown for series
+        AnimatedVisibility(
+            visible = playbackEnded && error == null && contentType == "SERIES" && nextEpisodeUrl != null,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.85f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Text(
+                        text = "Up Next",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = nextEpisodeTitle ?: "Next Episode",
+                        color = Color.White,
+                        style = MaterialTheme.typography.headlineMedium
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    
+                    if (!autoPlayCancelled) {
+                        // Countdown circle
+                        Box(
+                            modifier = Modifier.size(80.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                progress = { autoPlayCountdown / 10f },
+                                modifier = Modifier.size(80.dp),
+                                color = DiokkoColors.Accent,
+                                strokeWidth = 4.dp,
+                                trackColor = Color.White.copy(alpha = 0.2f)
+                            )
+                            Text(
+                                text = "$autoPlayCountdown",
+                                color = Color.White,
+                                style = MaterialTheme.typography.headlineLarge
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Starting in $autoPlayCountdown seconds...",
+                            color = Color.White.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.height(24.dp))
+                    
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        // Play Now button
+                        Button(
+                            onClick = {
+                                if (nextEpisodeUrl != null && nextEpisodeTitle != null) {
+                                    onPlayNext(nextEpisodeUrl, nextEpisodeTitle)
+                                }
+                            },
+                            colors = ButtonDefaults.colors(
+                                containerColor = DiokkoColors.Accent
+                            )
+                        ) {
+                            Text("Play Now")
+                        }
+                        
+                        // Cancel button
+                        Button(
+                            onClick = {
+                                autoPlayCancelled = true
+                                onBack()
+                            },
+                            colors = ButtonDefaults.colors(
+                                containerColor = Color.Gray
+                            )
+                        ) {
+                            Text("Go Back")
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Playback ended overlay for movies (simple "Playback Complete" message)
+        AnimatedVisibility(
+            visible = playbackEnded && error == null && contentType == "MOVIE",
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.85f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "✓",
+                        color = DiokkoColors.Accent,
+                        style = MaterialTheme.typography.displayLarge
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Playback Complete",
+                        color = Color.White,
+                        style = MaterialTheme.typography.headlineMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Returning to previous screen...",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+        
         // Controls overlay
         AnimatedVisibility(
             visible = showControls && error == null,
@@ -326,26 +549,24 @@ fun VideoPlayerScreen(
                 }
                 
                 // Center play/pause indicator
-                if (!isPlaying) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .size(80.dp)
+                            .background(
+                                color = Color.Black.copy(alpha = 0.6f),
+                                shape = CircleShape
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(80.dp)
-                                .background(
-                                    color = Color.Black.copy(alpha = 0.6f),
-                                    shape = CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "▶︎",
-                                color = Color.White,
-                                style = MaterialTheme.typography.headlineLarge
-                            )
-                        }
+                        Text(
+                            text = if (isPlaying) "⏸" else "▶",
+                            color = Color.White,
+                            style = MaterialTheme.typography.headlineLarge
+                        )
                     }
                 }
                 
