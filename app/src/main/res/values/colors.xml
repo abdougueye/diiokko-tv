@@ -25,4 +25,9 @@
     <color name="overlay_dark">#80000000</color>
     <color name="gradient_start">#001A1A2E</color>
     <color name="gradient_end">#CC1A1A2E</color>
+    
+    <!-- Logo -->
+    <color name="ic_launcher_background">@color/diokko_deep_purple</color>
+    <color name="logo_pink">#FF69B4</color>
+    
 </resources>
