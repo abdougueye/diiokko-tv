@@ -28,6 +28,4 @@
     
     <!-- Logo -->
     <color name="ic_launcher_background">@color/diokko_deep_purple</color>
-    <color name="logo_pink">#FF69B4</color>
-    
 </resources>

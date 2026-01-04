@@ -234,8 +234,7 @@ adb shell
 # Switch to your app's identity
 run-as com.diokko.player.debug
 
-# Copy the database to the public /sdcard/ folder
-# (Change 'diokko.db' to whatever name you used in your Room setup)
+# Copy the database to the public /sdcard/ folderS
 cp databases/diokko_database /sdcard/diokko_database
 
 # Exit the app's identity

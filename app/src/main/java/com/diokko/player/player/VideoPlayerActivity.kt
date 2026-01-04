@@ -549,24 +549,26 @@ fun VideoPlayerScreen(
                 }
                 
                 // Center play/pause indicator
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+                if (!isPlaying) {
                     Box(
-                        modifier = Modifier
-                            .size(80.dp)
-                            .background(
-                                color = Color.Black.copy(alpha = 0.6f),
-                                shape = CircleShape
-                            ),
+                        modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = if (isPlaying) "⏸" else "▶",
-                            color = Color.White,
-                            style = MaterialTheme.typography.headlineLarge
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(80.dp)
+                                .background(
+                                    color = Color.Black.copy(alpha = 0.6f),
+                                    shape = CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "▶︎",
+                                color = Color.White,
+                                style = MaterialTheme.typography.headlineLarge
+                            )
+                        }
                     }
                 }
                 
