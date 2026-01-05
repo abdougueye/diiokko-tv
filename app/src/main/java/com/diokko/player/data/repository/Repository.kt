@@ -495,6 +495,17 @@ class PlaylistRepository @Inject constructor(
             logW("Series: ${parseResult.seriesCount}")
             logW("Categories: ${categoryMap.size}")
             
+            // Force WAL checkpoint to ensure data is persisted immediately
+            // This prevents data loss if the app is killed before automatic checkpoint
+            try {
+                logW("Checkpointing database to ensure data persistence...")
+                val app = context.applicationContext as? com.diokko.player.DiokkoApp
+                app?.checkpointDatabase()
+                logW("Database checkpoint initiated")
+            } catch (e: Exception) {
+                logE("Failed to checkpoint database", e)
+            }
+            
         } finally {
             // ========================================
             // PHASE 3: Clean up cache file
@@ -555,6 +566,16 @@ class PlaylistRepository @Inject constructor(
             series.copy(categoryId = series.genre?.let { seriesCategoryMap[it] })
         }
         seriesDao.insertSeriesList(seriesWithCategories)
+        
+        // Force WAL checkpoint to ensure data is persisted immediately
+        try {
+            logW("Xtream refresh complete - checkpointing database...")
+            val app = context.applicationContext as? com.diokko.player.DiokkoApp
+            app?.checkpointDatabase()
+            logW("Database checkpoint initiated")
+        } catch (e: Exception) {
+            logE("Failed to checkpoint database", e)
+        }
     }
     
     /**
