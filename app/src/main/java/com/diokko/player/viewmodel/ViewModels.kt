@@ -172,8 +172,13 @@ class TvViewModel @Inject constructor(
             kotlinx.coroutines.delay(300)
             
             // Always search all channels, not just current category
+            // Filter out dividers to prevent focusing on non-playable items
             contentRepository.searchChannels(query).collect { results ->
-                _channels.value = results
+                _channels.value = results.filter { channel ->
+                    !channel.isDivider && 
+                    !channel.name.startsWith("#####") &&
+                    channel.streamUrl.isNotBlank()
+                }
             }
         }
     }
