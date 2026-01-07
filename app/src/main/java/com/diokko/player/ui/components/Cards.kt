@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -192,6 +193,162 @@ fun ContentCard(
                 
                 if (subtitle != null) {
                     Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = subtitle,
+                        style = DiokkoTypography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Focusable content card for use in LazyVerticalGrid.
+ * Uses native Android focus system for proper D-Pad navigation.
+ * 
+ * Modifier order is critical for Fire TV:
+ * 1. Layout modifiers (aspectRatio)
+ * 2. onFocusChanged - track focus state
+ * 3. focusable - register as focus target
+ * 4. clickable - handles D-Pad Enter/Center automatically
+ * 5. Visual modifiers (scale, shadow, clip, background, border)
+ * 
+ * @param onFocused Callback when this card receives focus (useful for tracking focused index)
+ */
+@Composable
+fun FocusableContentCard(
+    title: String,
+    subtitle: String? = null,
+    imageUrl: String? = null,
+    posterEmoji: String = "🎬",
+    onClick: () -> Unit = {},
+    onFocused: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.05f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "scale"
+    )
+    
+    val elevation by animateDpAsState(
+        targetValue = if (isFocused) 24.dp else 8.dp,
+        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        label = "elevation"
+    )
+    
+    val borderAlpha by animateFloatAsState(
+        targetValue = if (isFocused) 1f else 0f,
+        animationSpec = tween(200),
+        label = "borderAlpha"
+    )
+    
+    Box(
+        modifier = modifier
+            .aspectRatio(0.67f) // Standard poster ratio (2:3)
+            // Focus modifiers FIRST (correct order for Fire TV)
+            .onFocusChanged { focusState ->
+                val wasFocused = isFocused
+                isFocused = focusState.isFocused
+                // Notify parent when we gain focus
+                if (!wasFocused && isFocused) {
+                    onFocused()
+                }
+            }
+            .focusable()
+            .clickable { onClick() } // Handles D-Pad Enter/Center automatically
+            // Visual modifiers AFTER focus chain
+            .scale(scale)
+            .shadow(
+                elevation = elevation,
+                shape = DiokkoShapes.medium,
+                ambientColor = if (isFocused) DiokkoColors.FocusGlow else Color.Transparent,
+                spotColor = if (isFocused) DiokkoColors.FocusGlow else Color.Transparent
+            )
+            .clip(DiokkoShapes.medium)
+            .background(
+                brush = if (isFocused) DiokkoGradients.cardHover else DiokkoGradients.card,
+                shape = DiokkoShapes.medium
+            )
+            .border(
+                width = 2.dp,
+                color = DiokkoColors.FocusBorder.copy(alpha = borderAlpha),
+                shape = DiokkoShapes.medium
+            )
+    ) {
+        Column {
+            // Poster area - takes most of the card
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                DiokkoColors.SurfaceElevated,
+                                DiokkoColors.Surface
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (!imageUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = imageUrl,
+                        contentDescription = title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = posterEmoji,
+                        style = DiokkoTypography.displayLarge.copy(fontSize = 48.sp)
+                    )
+                }
+                
+                // Gradient overlay at bottom
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            brush = Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    DiokkoColors.Surface.copy(alpha = 0.9f)
+                                )
+                            )
+                        )
+                )
+            }
+            
+            // Info area
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = DiokkoDimens.spacingSm, vertical = DiokkoDimens.spacingXs)
+            ) {
+                Text(
+                    text = title,
+                    style = if (isFocused) 
+                        DiokkoTypography.labelMedium.copy(color = DiokkoColors.TextPrimary)
+                    else 
+                        DiokkoTypography.labelMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                
+                if (subtitle != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = subtitle,
                         style = DiokkoTypography.labelSmall,

@@ -227,7 +227,7 @@ curl "http://line.yo-ott.com:80/xmltv.php?username=4462c4c019&password=28bb86ec6
 
 
 # Database viewing
-```shell
+```sh
 # Enter the FireTV shell
 adb shell
 

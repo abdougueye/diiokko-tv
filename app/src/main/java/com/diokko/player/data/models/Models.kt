@@ -428,3 +428,35 @@ data class XtreamEpisodeInfo(
     val duration: String? = null,
     val bitrate: Int? = null
 )
+
+/**
+ * Sealed class for type-safe search results.
+ * Replaces Triple<String, Any, Unit> for better maintainability.
+ */
+sealed class SearchResult {
+    abstract val id: Long
+    abstract val name: String
+    abstract val subtitle: String?
+    abstract val emoji: String
+    
+    data class ChannelResult(val channel: Channel) : SearchResult() {
+        override val id: Long get() = channel.id
+        override val name: String get() = channel.name
+        override val subtitle: String? get() = channel.groupTitle
+        override val emoji: String get() = "📺"
+    }
+    
+    data class MovieResult(val movie: Movie) : SearchResult() {
+        override val id: Long get() = movie.id
+        override val name: String get() = movie.name
+        override val subtitle: String? get() = movie.genre
+        override val emoji: String get() = "🎬"
+    }
+    
+    data class SeriesResult(val series: Series) : SearchResult() {
+        override val id: Long get() = series.id
+        override val name: String get() = series.name
+        override val subtitle: String? get() = series.genre
+        override val emoji: String get() = "📺"
+    }
+}
