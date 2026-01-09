@@ -10,6 +10,7 @@ import com.diokko.player.data.parser.XtreamContentConverter
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -755,5 +756,328 @@ class ContentRepository @Inject constructor(
     
     suspend fun clearHistory() {
         playbackHistoryDao.clearHistory()
+    }
+}
+
+/**
+ * Repository for EPG (Electronic Program Guide) operations
+ */
+@Singleton
+class EpgRepository @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val epgDao: EpgDao,
+    private val channelDao: ChannelDao,
+    private val playlistDao: PlaylistDao,
+    private val xmltvParser: com.diokko.player.data.parser.XmltvParser,
+    private val httpClient: OkHttpClient
+) {
+    companion object {
+        private const val TAG = "EpgRepository"
+        private const val EPG_REFRESH_INTERVAL = 6 * 60 * 60 * 1000L  // 6 hours
+        private const val EPG_CACHE_FILE = "epg_temp.xml"
+    }
+    
+    /**
+     * Get current program for a channel
+     */
+    suspend fun getCurrentProgram(channelId: Long): EpgProgram? {
+        return epgDao.getCurrentProgram(channelId, System.currentTimeMillis())
+    }
+    
+    /**
+     * Get next program for a channel
+     */
+    suspend fun getNextProgram(channelId: Long): EpgProgram? {
+        return epgDao.getNextProgram(channelId, System.currentTimeMillis())
+    }
+    
+    /**
+     * Get all programs for a channel (from now onwards)
+     */
+    fun getProgramsForChannel(channelId: Long): Flow<List<EpgProgram>> {
+        return epgDao.getProgramsForChannel(channelId, System.currentTimeMillis())
+    }
+    
+    /**
+     * Get current programs for multiple channels at once
+     * NOTE: Only use for small batches (<100 channels) to avoid SQLite variable limit
+     */
+    suspend fun getCurrentProgramsForChannels(channelIds: List<Long>): Map<Long, EpgProgram> {
+        if (channelIds.isEmpty()) return emptyMap()
+        
+        // Batch into chunks of 50 to avoid SQLite variable limit (999)
+        val allPrograms = channelIds.chunked(50).flatMap { batch ->
+            epgDao.getCurrentProgramsLimited(System.currentTimeMillis())
+                .filter { it.channelId in batch }
+        }
+        return allPrograms.associateBy { it.channelId }
+    }
+    
+    /**
+     * OPTIMIZED: Get current programs for a specific group title using JOIN.
+     * Avoids "too many SQL variables" error.
+     */
+    suspend fun getCurrentProgramsForGroup(groupTitle: String): Map<Long, EpgProgram> {
+        val programs = epgDao.getCurrentProgramsForGroup(groupTitle, System.currentTimeMillis())
+        return programs.associateBy { it.channelId }
+    }
+    
+    /**
+     * OPTIMIZED: Get upcoming programs for a specific group title using JOIN.
+     */
+    suspend fun getUpcomingProgramsForGroup(groupTitle: String): Map<Long, List<EpgProgram>> {
+        val now = System.currentTimeMillis()
+        val threeHoursLater = now + (3 * 60 * 60 * 1000)
+        
+        val programs = epgDao.getUpcomingProgramsForGroup(groupTitle, now, threeHoursLater)
+        return programs.groupBy { it.channelId }
+    }
+    
+    /**
+     * OPTIMIZED: Get current programs for a specific category using JOIN.
+     */
+    suspend fun getCurrentProgramsForCategory(categoryId: Long): Map<Long, EpgProgram> {
+        val programs = epgDao.getCurrentProgramsForCategory(categoryId, System.currentTimeMillis())
+        return programs.associateBy { it.channelId }
+    }
+    
+    /**
+     * OPTIMIZED: Get upcoming programs for a specific category using JOIN.
+     */
+    suspend fun getUpcomingProgramsForCategory(categoryId: Long): Map<Long, List<EpgProgram>> {
+        val now = System.currentTimeMillis()
+        val threeHoursLater = now + (3 * 60 * 60 * 1000)
+        
+        val programs = epgDao.getUpcomingProgramsForCategory(categoryId, now, threeHoursLater)
+        return programs.groupBy { it.channelId }
+    }
+    
+    /**
+     * Get current programs for initial load (limited to avoid memory issues)
+     */
+    suspend fun getCurrentProgramsLimited(): Map<Long, EpgProgram> {
+        val programs = epgDao.getCurrentProgramsLimited(System.currentTimeMillis())
+        return programs.associateBy { it.channelId }
+    }
+    
+    /**
+     * Refresh EPG data for all active playlists
+     */
+    suspend fun refreshEpgForAllPlaylists(): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            Log.i(TAG, "=== EPG REFRESH STARTING ===")
+            
+            var totalPrograms = 0
+            
+            // Get all active playlists with EPG URLs (use .first() for one-time snapshot)
+            val playlists = playlistDao.getActivePlaylists().first()
+            Log.i(TAG, "Found ${playlists.size} active playlists")
+            
+            for (playlist in playlists) {
+                Log.i(TAG, "Processing playlist: ${playlist.name}, type=${playlist.type}, url=${playlist.url?.take(50)}")
+                val epgUrl = getEpgUrlForPlaylist(playlist)
+                Log.i(TAG, "EPG URL for ${playlist.name}: ${epgUrl ?: "NULL"}")
+                
+                if (epgUrl != null) {
+                    val result = refreshEpgForPlaylist(playlist, epgUrl)
+                    if (result.isSuccess) {
+                        totalPrograms += result.getOrDefault(0)
+                    } else {
+                        Log.e(TAG, "Failed to refresh EPG for ${playlist.name}: ${result.exceptionOrNull()?.message}")
+                    }
+                }
+            }
+            
+            // Clean up old programs
+            epgDao.deleteOldPrograms(System.currentTimeMillis() - (24 * 60 * 60 * 1000))
+            
+            Log.i(TAG, "=== EPG REFRESH COMPLETE: $totalPrograms programs ===")
+            Result.success(totalPrograms)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to refresh EPG", e)
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Refresh EPG data for a specific playlist.
+     * Downloads EPG to cache file first for memory efficiency.
+     */
+    suspend fun refreshEpgForPlaylist(playlist: Playlist, epgUrl: String? = null): Result<Int> = withContext(Dispatchers.IO) {
+        val cacheFile = java.io.File(context.cacheDir, EPG_CACHE_FILE)
+        
+        try {
+            val url = epgUrl ?: getEpgUrlForPlaylist(playlist)
+            if (url == null) {
+                Log.i(TAG, "No EPG URL for playlist: ${playlist.name}")
+                return@withContext Result.success(0)
+            }
+            
+            Log.i(TAG, "Downloading EPG from: $url")
+            
+            // 1. Download to Cache File
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .addHeader("Accept", "application/xml, text/xml, */*")
+                .build()
+            val response = httpClient.newCall(request).execute()
+            
+            if (!response.isSuccessful) {
+                Log.e(TAG, "EPG Download failed: ${response.code}")
+                return@withContext Result.failure(Exception("EPG Download failed: ${response.code}"))
+            }
+            
+            response.body?.byteStream()?.use { input ->
+                cacheFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            
+            Log.i(TAG, "Download complete. File size: ${cacheFile.length()} bytes")
+            
+            // 2. Parse from File
+            val parsedPrograms = java.io.FileInputStream(cacheFile).use { fileInput ->
+                xmltvParser.parse(fileInput)
+            }
+            
+            Log.i(TAG, "Parsed ${parsedPrograms.size} raw programs from XMLTV")
+            
+            // Log sample of parsed channel IDs for debugging
+            val sampleChannelIds = parsedPrograms.take(10).map { it.channelId }.distinct()
+            Log.i(TAG, "Sample XMLTV channel IDs: $sampleChannelIds")
+            
+            // 3. Get channel ID mapping for this playlist
+            val channelMappings = channelDao.getChannelsWithEpgIdForPlaylist(playlist.id)
+            val channelIdMap = channelMappings.associate { it.epgChannelId to it.id }
+            
+            Log.i(TAG, "Found ${channelIdMap.size} channels with EPG IDs in database")
+            
+            // Log sample of database channel EPG IDs for debugging
+            val sampleDbEpgIds = channelIdMap.keys.take(10).toList()
+            Log.i(TAG, "Sample DB epgChannelIds: $sampleDbEpgIds")
+            
+            if (channelIdMap.isEmpty()) {
+                Log.w(TAG, "No channels have EPG IDs - EPG data won't be linked. Check if M3U has tvg-id attributes.")
+                return@withContext Result.success(0)
+            }
+            
+            // 4. Convert to EpgProgram entities
+            val programs = xmltvParser.convertToEpgPrograms(parsedPrograms, channelIdMap)
+            Log.i(TAG, "Matched ${programs.size} EPG programs to channels (${parsedPrograms.size} raw -> ${programs.size} matched)")
+            
+            if (programs.isEmpty() && parsedPrograms.isNotEmpty()) {
+                Log.w(TAG, "EPG ID MISMATCH: Parsed ${parsedPrograms.size} programs but 0 matched channels!")
+                Log.w(TAG, "XMLTV uses channel IDs like: ${sampleChannelIds.take(5)}")
+                Log.w(TAG, "Database has epgChannelIds like: ${sampleDbEpgIds.take(5)}")
+            }
+            
+            // 5. Delete old programs for this playlist and insert new ones
+            epgDao.deleteProgramsForPlaylist(playlist.id)
+            
+            // Insert in batches to avoid memory issues
+            programs.chunked(1000).forEach { batch ->
+                epgDao.insertPrograms(batch)
+            }
+            
+            // Update playlist EPG timestamp
+            playlistDao.updatePlaylist(playlist.copy(epgLastUpdated = System.currentTimeMillis()))
+            
+            Log.i(TAG, "EPG refresh complete for ${playlist.name}: ${programs.size} programs inserted")
+            Result.success(programs.size)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to refresh EPG for playlist: ${playlist.name}", e)
+            Result.failure(e)
+        } finally {
+            // 6. Cleanup cache file
+            if (cacheFile.exists()) {
+                cacheFile.delete()
+            }
+        }
+    }
+    
+    /**
+     * Get EPG URL for a playlist
+     */
+    private fun getEpgUrlForPlaylist(playlist: Playlist): String? {
+        // If playlist has explicit EPG URL, use it
+        if (!playlist.epgUrl.isNullOrBlank()) {
+            return playlist.epgUrl
+        }
+        
+        // For Xtream Codes playlists, generate EPG URL
+        if (playlist.type == PlaylistType.XTREAM_CODES && 
+            !playlist.serverUrl.isNullOrBlank() && 
+            !playlist.username.isNullOrBlank() && 
+            !playlist.password.isNullOrBlank()) {
+            return xmltvParser.buildEpgUrl(playlist.serverUrl, playlist.username, playlist.password)
+        }
+        
+        // For M3U playlists, try to extract EPG URL from the M3U URL if it follows Xtream Codes pattern
+        // Pattern: http://<server>/get.php?username=<user>&password=<pass>&type=m3u_plus...
+        if (playlist.type == PlaylistType.M3U && !playlist.url.isNullOrBlank()) {
+            Log.i(TAG, "Attempting to extract EPG URL from M3U: ${playlist.url?.take(80)}...")
+            val epgUrl = extractEpgUrlFromM3uUrl(playlist.url)
+            if (epgUrl != null) {
+                Log.i(TAG, "Extracted EPG URL from M3U: $epgUrl")
+                return epgUrl
+            } else {
+                Log.w(TAG, "Could not extract EPG URL from M3U URL")
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Extract EPG URL from M3U URL if it follows Xtream Codes pattern.
+     * Converts: http://server/get.php?username=X&password=Y&type=m3u_plus...
+     * To: http://server/xmltv.php?username=X&password=Y
+     */
+    private fun extractEpgUrlFromM3uUrl(m3uUrl: String): String? {
+        try {
+            val uri = android.net.Uri.parse(m3uUrl)
+            val username = uri.getQueryParameter("username")
+            val password = uri.getQueryParameter("password")
+            
+            Log.i(TAG, "M3U URL parsing - username=${username?.take(5)}***, password=${if (password != null) "***" else "null"}")
+            
+            if (username.isNullOrBlank() || password.isNullOrBlank()) {
+                Log.w(TAG, "M3U URL missing username or password parameters")
+                return null
+            }
+            
+            // Build server base URL
+            val scheme = uri.scheme ?: "http"
+            val host = uri.host ?: return null
+            val port = if (uri.port != -1) ":${uri.port}" else ""
+            val serverUrl = "$scheme://$host$port"
+            
+            val epgUrl = xmltvParser.buildEpgUrl(serverUrl, username, password)
+            Log.i(TAG, "Built EPG URL: $epgUrl")
+            return epgUrl
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract EPG URL from M3U URL: $m3uUrl", e)
+            return null
+        }
+    }
+    
+    /**
+     * Check if EPG needs refresh (older than 6 hours)
+     */
+    fun needsRefresh(playlist: Playlist): Boolean {
+        val lastUpdated = playlist.epgLastUpdated ?: 0
+        return System.currentTimeMillis() - lastUpdated > EPG_REFRESH_INTERVAL
+    }
+    
+    /**
+     * Get EPG program count
+     */
+    suspend fun getProgramCount(): Int = epgDao.getProgramCount()
+    
+    /**
+     * Clear all EPG data
+     */
+    suspend fun clearAllEpg() {
+        epgDao.deleteAllPrograms()
     }
 }

@@ -6,7 +6,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -194,13 +196,16 @@ fun AddPlaylistScreen(
                 )
             }
             
-            // Right side - Form
+            // Right side - Form (scrollable for Fire TV)
+            val scrollState = rememberScrollState()
+            
             Column(
                 modifier = Modifier
                     .weight(1f)
                     .clip(DiokkoShapes.large)
                     .background(DiokkoColors.Surface)
                     .padding(DiokkoDimens.spacingXl)
+                    .verticalScroll(scrollState)
             ) {
                 Text(
                     text = "Playlist Details",
@@ -302,7 +307,7 @@ fun AddPlaylistScreen(
                     }
                 }
                 
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(DiokkoDimens.spacingXl))
                 
                 // Save button
                 Row(

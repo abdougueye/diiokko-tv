@@ -78,6 +78,15 @@ sealed class Screen(val route: String, val icon: String, val label: String) {
 // Focus level: 0 = nav rail, 1 = categories, 2 = content
 enum class FocusLevel { NAV_RAIL, CATEGORIES, CONTENT }
 
+/**
+ * Time slot info for EPG display
+ */
+data class TimeSlotInfo(
+    val displayTime: String,
+    val startTime: Long,
+    val endTime: Long
+)
+
 @Composable
 fun DiokkoMainContent() {
     var currentScreen by remember { mutableStateOf<Screen>(Screen.TV) }
@@ -434,6 +443,10 @@ fun TvScreenContent(
     val categories by viewModel.categories.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     
+    // EPG data
+    val epgData by viewModel.epgData.collectAsState()
+    val isEpgLoading by viewModel.isEpgLoading.collectAsState()
+    
     val categoryFocusRequester = remember { FocusRequester() }
     val epgFocusRequester = remember { FocusRequester() }
     
@@ -448,20 +461,26 @@ fun TvScreenContent(
     // Track if search bar has focus
     var searchBarHasFocus by remember { mutableStateOf(false) }
     
-    // Time slots (30-min intervals, showing 5 slots)
-    val timeSlots = remember {
+    // Time slots (30-min intervals, showing 5 slots) with timestamps
+    val timeSlotData = remember {
         val calendar = java.util.Calendar.getInstance()
         val minute = calendar.get(java.util.Calendar.MINUTE)
         // Round down to nearest 30 min
         calendar.set(java.util.Calendar.MINUTE, if (minute < 30) 0 else 30)
         calendar.set(java.util.Calendar.SECOND, 0)
+        calendar.set(java.util.Calendar.MILLISECOND, 0)
         
         (0..4).map { i ->
             val slotCal = calendar.clone() as java.util.Calendar
             slotCal.add(java.util.Calendar.MINUTE, i * 30)
-            String.format("%02d:%02d", slotCal.get(java.util.Calendar.HOUR_OF_DAY), slotCal.get(java.util.Calendar.MINUTE))
+            TimeSlotInfo(
+                displayTime = String.format("%02d:%02d", slotCal.get(java.util.Calendar.HOUR_OF_DAY), slotCal.get(java.util.Calendar.MINUTE)),
+                startTime = slotCal.timeInMillis,
+                endTime = slotCal.timeInMillis + (30 * 60 * 1000)  // 30 minutes later
+            )
         }
     }
+    val timeSlots = timeSlotData.map { it.displayTime }
     
     // Load channels only once when screen first appears
     LaunchedEffect(Unit) {
@@ -524,6 +543,30 @@ fun TvScreenContent(
         }
     }
     
+    /**
+     * Get program title for a specific time slot
+     */
+    fun getProgramForSlot(channelId: Long, slotIndex: Int): String {
+        val channelEpg = epgData[channelId] ?: return "No info"
+        val slotInfo = timeSlotData.getOrNull(slotIndex) ?: return "No info"
+        
+        // Check if current program overlaps with this slot
+        channelEpg.currentProgram?.let { program ->
+            if (program.startTime < slotInfo.endTime && program.endTime > slotInfo.startTime) {
+                return program.title
+            }
+        }
+        
+        // Check upcoming programs
+        channelEpg.upcomingPrograms.forEach { program ->
+            if (program.startTime < slotInfo.endTime && program.endTime > slotInfo.startTime) {
+                return program.title
+            }
+        }
+        
+        return "No info"
+    }
+    
     fun playChannel(url: String, title: String) {
         val intent = Intent(context, VideoPlayerActivity::class.java).apply {
             putExtra(VideoPlayerActivity.EXTRA_URL, url)
@@ -550,6 +593,23 @@ fun TvScreenContent(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
+            
+            // EPG status indicator
+            if (isEpgLoading) {
+                Text(
+                    text = "📡 Loading EPG...",
+                    style = DiokkoTypography.bodySmall,
+                    color = DiokkoColors.Accent
+                )
+                Spacer(modifier = Modifier.width(DiokkoDimens.spacingSm))
+            } else if (epgData.isNotEmpty()) {
+                Text(
+                    text = "📡 EPG",
+                    style = DiokkoTypography.bodySmall,
+                    color = DiokkoColors.TextSecondary
+                )
+                Spacer(modifier = Modifier.width(DiokkoDimens.spacingSm))
+            }
             
             // Contextual search bar
             com.diokko.player.ui.components.ContextualSearchBar(
@@ -847,6 +907,7 @@ fun TvScreenContent(
                                     // Program slots
                                     timeSlots.forEachIndexed { slotIndex, _ ->
                                         val isSlotSelected = isChannelSelected && slotIndex == selectedTimeSlot
+                                        val programTitle = getProgramForSlot(channel.id, slotIndex)
                                         
                                         Box(
                                             modifier = Modifier
@@ -869,10 +930,11 @@ fun TvScreenContent(
                                             contentAlignment = Alignment.CenterStart
                                         ) {
                                             Text(
-                                                text = "No info",
+                                                text = programTitle,
                                                 style = DiokkoTypography.labelSmall,
                                                 color = if (isSlotSelected) DiokkoColors.TextOnAccent 
-                                                       else DiokkoColors.TextSecondary,
+                                                       else if (programTitle == "No info") DiokkoColors.TextSecondary
+                                                       else DiokkoColors.TextPrimary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
