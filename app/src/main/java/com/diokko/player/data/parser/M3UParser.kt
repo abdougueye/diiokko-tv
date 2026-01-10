@@ -352,7 +352,8 @@ class M3UParser @Inject constructor() {
                     }
                     
                     // Extract remaining attributes using fast string operations
-                    val tvgId = extractAttribute(currentExtInf!!, TVG_ID_KEY)
+                    val tvgIdRaw = extractAttribute(currentExtInf!!, TVG_ID_KEY)
+                    val tvgId = if (tvgIdRaw.isNullOrBlank()) null else tvgIdRaw
                     val tvgLogo = extractAttribute(currentExtInf!!, TVG_LOGO_KEY)
                     // Use tvg-name as displayName
                     val displayName = extractAttribute(currentExtInf!!, TVG_NAME_KEY) ?: extractDisplayName(currentExtInf!!)
@@ -619,7 +620,8 @@ class M3UParser @Inject constructor() {
             if (line.startsWith("#EXTINF:")) {
                 currentExtInf = line
             } else if (line[0] != '#' && currentExtInf != null) {
-                val tvgId = extractAttribute(currentExtInf, TVG_ID_KEY)
+                val tvgIdRaw = extractAttribute(currentExtInf, TVG_ID_KEY)
+                val tvgId = if (tvgIdRaw.isNullOrBlank()) null else tvgIdRaw
                 val tvgLogo = extractAttribute(currentExtInf, TVG_LOGO_KEY)
                 val groupTitle = extractAttribute(currentExtInf, GROUP_TITLE_KEY) ?: "Other"
                 val displayName = extractAttribute(currentExtInf, TVG_NAME_KEY) ?: extractDisplayName(currentExtInf)

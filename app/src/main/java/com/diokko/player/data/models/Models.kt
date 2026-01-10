@@ -39,6 +39,9 @@ data class Playlist(
     val serverUrl: String? = null,
     val username: String? = null,
     val password: String? = null,
+    // EPG URL (auto-generated for Xtream Codes, can be custom for M3U)
+    val epgUrl: String? = null,
+    val epgLastUpdated: Long? = null,
     // Metadata
     val lastUpdated: Long = System.currentTimeMillis(),
     val isActive: Boolean = true,
@@ -245,12 +248,13 @@ data class Episode(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("channelId"), Index("startTime"), Index("endTime")]
+    indices = [Index("channelId"), Index("startTime"), Index("endTime"), Index("epgChannelId")]
 )
 data class EpgProgram(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
     val channelId: Long,
+    val epgChannelId: String? = null,  // For direct matching without join
     val title: String,
     val description: String? = null,
     val startTime: Long,

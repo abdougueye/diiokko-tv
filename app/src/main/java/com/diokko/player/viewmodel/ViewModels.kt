@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.diokko.player.data.models.*
 import com.diokko.player.data.repository.ContentRepository
+import com.diokko.player.data.repository.EpgSearchResult
 import com.diokko.player.data.repository.PlaylistRepository
 import com.diokko.player.ui.navigation.Screen
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -52,11 +53,22 @@ data class TvUiState(
 )
 
 /**
+ * EPG data for display
+ */
+data class ChannelEpgData(
+    val currentProgram: EpgProgram? = null,
+    val nextProgram: EpgProgram? = null,
+    val upcomingPrograms: List<EpgProgram> = emptyList()
+)
+
+/**
  * ViewModel for TV screen
  */
 @HiltViewModel
 class TvViewModel @Inject constructor(
-    private val contentRepository: ContentRepository
+    private val contentRepository: ContentRepository,
+    private val epgRepository: com.diokko.player.data.repository.EpgRepository,
+    private val playlistRepository: PlaylistRepository
 ) : ViewModel() {
     
     private val _channels = MutableStateFlow<List<Channel>>(emptyList())
@@ -71,6 +83,20 @@ class TvViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
     
+    // EPG state
+    private val _epgData = MutableStateFlow<Map<Long, ChannelEpgData>>(emptyMap())
+    val epgData: StateFlow<Map<Long, ChannelEpgData>> = _epgData.asStateFlow()
+    
+    private val _isEpgLoading = MutableStateFlow(false)
+    val isEpgLoading: StateFlow<Boolean> = _isEpgLoading.asStateFlow()
+    
+    private val _epgLastUpdated = MutableStateFlow<Long?>(null)
+    val epgLastUpdated: StateFlow<Long?> = _epgLastUpdated.asStateFlow()
+    
+    // EPG search results
+    private val _epgSearchResults = MutableStateFlow<List<EpgSearchResult>>(emptyList())
+    val epgSearchResults: StateFlow<List<EpgSearchResult>> = _epgSearchResults.asStateFlow()
+    
     // Contextual search
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -81,6 +107,8 @@ class TvViewModel @Inject constructor(
     private var channelsJob: kotlinx.coroutines.Job? = null
     private var categoriesJob: kotlinx.coroutines.Job? = null
     private var searchJob: kotlinx.coroutines.Job? = null
+    private var epgSearchJob: kotlinx.coroutines.Job? = null
+    private var epgJob: kotlinx.coroutines.Job? = null
     
     // Store current category for search filtering
     private var currentGroupTitle: String? = null
@@ -104,6 +132,9 @@ class TvViewModel @Inject constructor(
             contentRepository.getAllChannels().collect { channels ->
                 _channels.value = channels
                 _isLoading.value = false
+                
+                // Load EPG data (limited to avoid SQLite variable limit)
+                loadEpgLimited()
             }
         }
         
@@ -113,6 +144,11 @@ class TvViewModel @Inject constructor(
             if (_isLoading.value) {
                 _isLoading.value = false
             }
+        }
+        
+        // Auto-refresh EPG if needed
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            checkAndRefreshEpg()
         }
     }
     
@@ -128,6 +164,8 @@ class TvViewModel @Inject constructor(
             contentRepository.getChannelsForCategory(categoryId).collect { channelList ->
                 _channels.value = channelList
                 _isLoading.value = false
+                // Use optimized category-based EPG query
+                loadEpgForCategory(categoryId)
             }
         }
     }
@@ -145,19 +183,24 @@ class TvViewModel @Inject constructor(
             contentRepository.getChannelsByGroupTitle(groupTitle).collect { channelList ->
                 _channels.value = channelList
                 _isLoading.value = false
+                // Use optimized group-based EPG query
+                loadEpgForGroup(groupTitle)
             }
         }
     }
     
-    // Contextual search methods - searches ALL categories
+    // Contextual search methods - searches ALL categories and EPG
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
         _isSearchActive.value = query.isNotBlank()
         
         searchJob?.cancel()
+        epgSearchJob?.cancel()
         channelsJob?.cancel()
         
         if (query.isBlank()) {
+            // Clear EPG search results
+            _epgSearchResults.value = emptyList()
             // Reload current category or all channels
             if (currentGroupTitle != null) {
                 loadChannelsForGroup(currentGroupTitle!!)
@@ -181,12 +224,31 @@ class TvViewModel @Inject constructor(
                 }
             }
         }
+        
+        // Search EPG programs concurrently
+        epgSearchJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.delay(300)
+            
+            try {
+                val epgResults = if (currentGroupTitle != null) {
+                    epgRepository.searchProgramsInGroup(query, currentGroupTitle!!)
+                } else {
+                    epgRepository.searchPrograms(query)
+                }
+                _epgSearchResults.value = epgResults
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "EPG search failed", e)
+                _epgSearchResults.value = emptyList()
+            }
+        }
     }
     
     fun clearSearch() {
         _searchQuery.value = ""
         _isSearchActive.value = false
         searchJob?.cancel()
+        epgSearchJob?.cancel()
+        _epgSearchResults.value = emptyList()
         
         // Reload current content
         if (currentGroupTitle != null) {
@@ -202,11 +264,172 @@ class TvViewModel @Inject constructor(
         }
     }
     
+    // === EPG Methods ===
+    
+    /**
+     * Load EPG data for the current group (optimized - uses SQL JOIN)
+     */
+    private suspend fun loadEpgForGroup(groupTitle: String) {
+        epgJob?.cancel()
+        
+        epgJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Get current programs using optimized JOIN query
+                val currentPrograms = epgRepository.getCurrentProgramsForGroup(groupTitle)
+                
+                // Get upcoming programs using optimized JOIN query
+                val upcomingPrograms = epgRepository.getUpcomingProgramsForGroup(groupTitle)
+                
+                // Build EPG data map
+                val allChannelIds = (currentPrograms.keys + upcomingPrograms.keys).toSet()
+                val epgMap = allChannelIds.associateWith { channelId ->
+                    val current = currentPrograms[channelId]
+                    val upcoming = upcomingPrograms[channelId] ?: emptyList()
+                    val next = upcoming.firstOrNull { it.startTime > (current?.endTime ?: 0) }
+                    
+                    ChannelEpgData(
+                        currentProgram = current,
+                        nextProgram = next,
+                        upcomingPrograms = upcoming
+                    )
+                }
+                
+                _epgData.value = epgMap
+                android.util.Log.d("TvViewModel", "Loaded EPG for group '$groupTitle': ${epgMap.size} channels")
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "Failed to load EPG data for group", e)
+            }
+        }
+    }
+    
+    /**
+     * Load EPG data for a category (optimized - uses SQL JOIN)
+     */
+    private suspend fun loadEpgForCategory(categoryId: Long) {
+        epgJob?.cancel()
+        
+        epgJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Get current programs using optimized JOIN query
+                val currentPrograms = epgRepository.getCurrentProgramsForCategory(categoryId)
+                
+                // Get upcoming programs using optimized JOIN query
+                val upcomingPrograms = epgRepository.getUpcomingProgramsForCategory(categoryId)
+                
+                // Build EPG data map
+                val allChannelIds = (currentPrograms.keys + upcomingPrograms.keys).toSet()
+                val epgMap = allChannelIds.associateWith { channelId ->
+                    val current = currentPrograms[channelId]
+                    val upcoming = upcomingPrograms[channelId] ?: emptyList()
+                    val next = upcoming.firstOrNull { it.startTime > (current?.endTime ?: 0) }
+                    
+                    ChannelEpgData(
+                        currentProgram = current,
+                        nextProgram = next,
+                        upcomingPrograms = upcoming
+                    )
+                }
+                
+                _epgData.value = epgMap
+                android.util.Log.d("TvViewModel", "Loaded EPG for category $categoryId: ${epgMap.size} channels")
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "Failed to load EPG data for category", e)
+            }
+        }
+    }
+    
+    /**
+     * Load EPG data for initial view (limited to avoid memory issues)
+     */
+    private suspend fun loadEpgLimited() {
+        epgJob?.cancel()
+        
+        epgJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Get limited current programs to avoid SQLite variable limit
+                val currentPrograms = epgRepository.getCurrentProgramsLimited()
+                
+                // Build EPG data map (no upcoming for limited load)
+                val epgMap = currentPrograms.mapValues { (_, program) ->
+                    ChannelEpgData(
+                        currentProgram = program,
+                        nextProgram = null,
+                        upcomingPrograms = emptyList()
+                    )
+                }
+                
+                _epgData.value = epgMap
+                android.util.Log.d("TvViewModel", "Loaded limited EPG: ${epgMap.size} channels")
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "Failed to load limited EPG data", e)
+            }
+        }
+    }
+    
+    /**
+     * Refresh EPG data from server
+     */
+    fun refreshEpg() {
+        android.util.Log.i("TvViewModel", "refreshEpg() called")
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _isEpgLoading.value = true
+            
+            try {
+                android.util.Log.i("TvViewModel", "Calling epgRepository.refreshEpgForAllPlaylists()...")
+                val result = epgRepository.refreshEpgForAllPlaylists()
+                android.util.Log.i("TvViewModel", "EPG refresh result: success=${result.isSuccess}, value=${result.getOrNull()}")
+                
+                if (result.isSuccess) {
+                    _epgLastUpdated.value = System.currentTimeMillis()
+                    // Reload EPG based on current view context
+                    if (currentGroupTitle != null) {
+                        loadEpgForGroup(currentGroupTitle!!)
+                    } else {
+                        loadEpgLimited()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "Failed to refresh EPG", e)
+            } finally {
+                _isEpgLoading.value = false
+            }
+        }
+    }
+    
+    /**
+     * Check if EPG needs refresh and refresh if necessary
+     */
+    private suspend fun checkAndRefreshEpg() {
+        try {
+            android.util.Log.i("TvViewModel", "Checking EPG status...")
+            // Check if we have any EPG data
+            val programCount = epgRepository.getProgramCount()
+            android.util.Log.i("TvViewModel", "Current EPG program count: $programCount")
+            if (programCount == 0) {
+                android.util.Log.i("TvViewModel", "No EPG data found, triggering refresh...")
+                refreshEpg()
+            } else {
+                android.util.Log.i("TvViewModel", "EPG data exists, skipping refresh")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("TvViewModel", "Error checking EPG status", e)
+        }
+    }
+    
+    /**
+     * Get EPG data for a specific channel
+     */
+    fun getEpgForChannel(channelId: Long): ChannelEpgData? {
+        return _epgData.value[channelId]
+    }
+    
     override fun onCleared() {
         super.onCleared()
         channelsJob?.cancel()
         categoriesJob?.cancel()
         searchJob?.cancel()
+        epgSearchJob?.cancel()
+        epgJob?.cancel()
     }
 }
 

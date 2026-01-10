@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
 import com.diokko.player.player.VideoPlayerActivity
+import com.diokko.player.data.repository.EpgSearchResult
 import com.diokko.player.ui.components.*
 import com.diokko.player.ui.screens.AboutScreen
 import com.diokko.player.ui.screens.AddPlaylistScreen
@@ -77,6 +78,15 @@ sealed class Screen(val route: String, val icon: String, val label: String) {
 
 // Focus level: 0 = nav rail, 1 = categories, 2 = content
 enum class FocusLevel { NAV_RAIL, CATEGORIES, CONTENT }
+
+/**
+ * Time slot info for EPG display
+ */
+data class TimeSlotInfo(
+    val displayTime: String,
+    val startTime: Long,
+    val endTime: Long
+)
 
 @Composable
 fun DiokkoMainContent() {
@@ -434,6 +444,10 @@ fun TvScreenContent(
     val categories by viewModel.categories.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     
+    // EPG data
+    val epgData by viewModel.epgData.collectAsState()
+    val isEpgLoading by viewModel.isEpgLoading.collectAsState()
+    
     val categoryFocusRequester = remember { FocusRequester() }
     val epgFocusRequester = remember { FocusRequester() }
     
@@ -448,20 +462,26 @@ fun TvScreenContent(
     // Track if search bar has focus
     var searchBarHasFocus by remember { mutableStateOf(false) }
     
-    // Time slots (30-min intervals, showing 5 slots)
-    val timeSlots = remember {
+    // Time slots (30-min intervals, showing 5 slots) with timestamps
+    val timeSlotData = remember {
         val calendar = java.util.Calendar.getInstance()
         val minute = calendar.get(java.util.Calendar.MINUTE)
         // Round down to nearest 30 min
         calendar.set(java.util.Calendar.MINUTE, if (minute < 30) 0 else 30)
         calendar.set(java.util.Calendar.SECOND, 0)
+        calendar.set(java.util.Calendar.MILLISECOND, 0)
         
         (0..4).map { i ->
             val slotCal = calendar.clone() as java.util.Calendar
             slotCal.add(java.util.Calendar.MINUTE, i * 30)
-            String.format("%02d:%02d", slotCal.get(java.util.Calendar.HOUR_OF_DAY), slotCal.get(java.util.Calendar.MINUTE))
+            TimeSlotInfo(
+                displayTime = String.format("%02d:%02d", slotCal.get(java.util.Calendar.HOUR_OF_DAY), slotCal.get(java.util.Calendar.MINUTE)),
+                startTime = slotCal.timeInMillis,
+                endTime = slotCal.timeInMillis + (30 * 60 * 1000)  // 30 minutes later
+            )
         }
     }
+    val timeSlots = timeSlotData.map { it.displayTime }
     
     // Load channels only once when screen first appears
     LaunchedEffect(Unit) {
@@ -491,37 +511,114 @@ fun TvScreenContent(
         }
     }
     
+    // Center-anchored scrolling for categories
     LaunchedEffect(selectedCategoryIndex) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-            categoryListState.animateScrollToItem(selectedCategoryIndex)
+            val layoutInfo = categoryListState.layoutInfo
+            val viewportHeight = layoutInfo.viewportSize.height
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                visibleItems.map { it.size }.average().toInt()
+            } else {
+                40
+            }
+            
+            val centerOffset = -(viewportHeight / 2) + (avgItemHeight / 2)
+            categoryListState.animateScrollToItem(
+                index = selectedCategoryIndex,
+                scrollOffset = centerOffset
+            )
         }
     }
     
     // Collect search state
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
+    val epgSearchResults by viewModel.epgSearchResults.collectAsState()
     val searchFocusRequester = remember { FocusRequester() }
     
     // Reset channel index when channels list changes (e.g., after search)
     // DON'T auto-focus results - let user navigate manually with Down key
     LaunchedEffect(channels) {
         if (selectedChannelIndex >= channels.size) {
-            selectedChannelIndex = 0
+            // Find first non-divider channel
+            val firstSelectable = channels.indexOfFirst { !it.isDivider }
+            selectedChannelIndex = if (firstSelectable >= 0) firstSelectable else 0
         }
     }
     
     LaunchedEffect(selectedCategoryIndex, categories) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
             viewModel.loadChannelsForGroup(categories[selectedCategoryIndex].name)
+            // Find first non-divider channel (will be set when channels load)
             selectedChannelIndex = 0
             selectedTimeSlot = 0
         }
     }
     
+    // Ensure selectedChannelIndex points to a non-divider when channels change
+    LaunchedEffect(channels, selectedChannelIndex) {
+        if (channels.isNotEmpty() && selectedChannelIndex in channels.indices) {
+            if (channels[selectedChannelIndex].isDivider) {
+                // Find next non-divider
+                val nextSelectable = channels.drop(selectedChannelIndex + 1).indexOfFirst { !it.isDivider }
+                selectedChannelIndex = if (nextSelectable >= 0) {
+                    selectedChannelIndex + 1 + nextSelectable
+                } else {
+                    channels.indexOfFirst { !it.isDivider }.coerceAtLeast(0)
+                }
+            }
+        }
+    }
+    
+    // Center-anchored scrolling - keep selected item in the middle of the viewport
     LaunchedEffect(selectedChannelIndex) {
         if (channels.isNotEmpty() && selectedChannelIndex in channels.indices) {
-            channelListState.scrollToItem(selectedChannelIndex)
+            val layoutInfo = channelListState.layoutInfo
+            val viewportHeight = layoutInfo.viewportSize.height
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            // Get average item height from visible items
+            val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                visibleItems.map { it.size }.average().toInt()
+            } else {
+                48 // fallback estimate in pixels
+            }
+            
+            // Calculate offset to center the item in viewport
+            // Negative offset scrolls the item down (towards center)
+            val centerOffset = -(viewportHeight / 2) + (avgItemHeight / 2)
+            
+            channelListState.animateScrollToItem(
+                index = selectedChannelIndex,
+                scrollOffset = centerOffset
+            )
         }
+    }
+    
+    /**
+     * Get program title for a specific time slot
+     */
+    fun getProgramForSlot(channelId: Long, slotIndex: Int): String {
+        val channelEpg = epgData[channelId] ?: return "No info"
+        val slotInfo = timeSlotData.getOrNull(slotIndex) ?: return "No info"
+        
+        // Check if current program overlaps with this slot
+        channelEpg.currentProgram?.let { program ->
+            if (program.startTime < slotInfo.endTime && program.endTime > slotInfo.startTime) {
+                return program.title
+            }
+        }
+        
+        // Check upcoming programs
+        channelEpg.upcomingPrograms.forEach { program ->
+            if (program.startTime < slotInfo.endTime && program.endTime > slotInfo.startTime) {
+                return program.title
+            }
+        }
+        
+        return "No info"
     }
     
     fun playChannel(url: String, title: String) {
@@ -530,6 +627,11 @@ fun TvScreenContent(
             putExtra(VideoPlayerActivity.EXTRA_TITLE, title)
         }
         context.startActivity(intent)
+    }
+    
+    fun formatTime(timestamp: Long): String {
+        val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+        return sdf.format(java.util.Date(timestamp))
     }
     
     Column(modifier = Modifier.fillMaxSize()) {
@@ -550,6 +652,23 @@ fun TvScreenContent(
                 )
             }
             Spacer(modifier = Modifier.weight(1f))
+            
+            // EPG status indicator
+            if (isEpgLoading) {
+                Text(
+                    text = "📡 Loading EPG...",
+                    style = DiokkoTypography.bodySmall,
+                    color = DiokkoColors.Accent
+                )
+                Spacer(modifier = Modifier.width(DiokkoDimens.spacingSm))
+            } else if (epgData.isNotEmpty()) {
+                Text(
+                    text = "📡 EPG",
+                    style = DiokkoTypography.bodySmall,
+                    color = DiokkoColors.TextSecondary
+                )
+                Spacer(modifier = Modifier.width(DiokkoDimens.spacingSm))
+            }
             
             // Contextual search bar
             com.diokko.player.ui.components.ContextualSearchBar(
@@ -575,7 +694,7 @@ fun TvScreenContent(
             
             Spacer(modifier = Modifier.width(DiokkoDimens.spacingMd))
             Text(
-                text = "${channels.size} channels",
+                text = "${channels.count { !it.isDivider }} channels",
                 style = DiokkoTypography.bodySmall,
                 color = DiokkoColors.TextSecondary
             )
@@ -703,8 +822,31 @@ fun TvScreenContent(
                             Text(text = "No channels in this category", style = DiokkoTypography.bodyMedium, color = DiokkoColors.TextSecondary)
                         }
                     } else {
-                        // Filter out dividers for EPG
-                        val epgChannels = channels.filter { !it.isDivider }
+                        // Keep all channels including dividers for section headers
+                        // Build a list of selectable (non-divider) indices for navigation
+                        val selectableIndices = channels.mapIndexedNotNull { index, channel ->
+                            if (!channel.isDivider) index else null
+                        }
+                        
+                        // Helper to get next/previous selectable index
+                        fun getNextSelectableIndex(currentIndex: Int): Int {
+                            val currentSelectablePos = selectableIndices.indexOf(currentIndex)
+                            return if (currentSelectablePos < selectableIndices.size - 1) {
+                                selectableIndices[currentSelectablePos + 1]
+                            } else currentIndex
+                        }
+                        
+                        fun getPrevSelectableIndex(currentIndex: Int): Int {
+                            val currentSelectablePos = selectableIndices.indexOf(currentIndex)
+                            return if (currentSelectablePos > 0) {
+                                selectableIndices[currentSelectablePos - 1]
+                            } else currentIndex
+                        }
+                        
+                        // Helper to clean divider name
+                        fun cleanDividerName(name: String): String {
+                            return name.replace("#", "").trim()
+                        }
                         
                         // Time bar header
                         Row(
@@ -752,16 +894,17 @@ fun TvScreenContent(
                                     if (event.type == KeyEventType.KeyDown && focusLevel == FocusLevel.CONTENT) {
                                         when (event.key) {
                                             Key.DirectionDown -> {
-                                                if (selectedChannelIndex < epgChannels.size - 1) selectedChannelIndex++
+                                                val nextIndex = getNextSelectableIndex(selectedChannelIndex)
+                                                if (nextIndex != selectedChannelIndex) selectedChannelIndex = nextIndex
                                                 true
                                             }
                                             Key.DirectionUp -> {
-                                                if (selectedChannelIndex > 0) {
-                                                    selectedChannelIndex--
+                                                val prevIndex = getPrevSelectableIndex(selectedChannelIndex)
+                                                if (prevIndex != selectedChannelIndex) {
+                                                    selectedChannelIndex = prevIndex
                                                     true
                                                 } else {
                                                     // At top of content, jump directly to search bar
-                                                    // Don't change focusLevel - just move focus to search bar
                                                     try { searchFocusRequester.requestFocus() } catch (e: Exception) {}
                                                     true
                                                 }
@@ -781,9 +924,11 @@ fun TvScreenContent(
                                                 true
                                             }
                                             Key.Enter, Key.DirectionCenter -> {
-                                                if (epgChannels.isNotEmpty() && selectedChannelIndex in epgChannels.indices) {
-                                                    val channel = epgChannels[selectedChannelIndex]
-                                                    playChannel(channel.streamUrl, channel.name)
+                                                if (channels.isNotEmpty() && selectedChannelIndex in channels.indices) {
+                                                    val channel = channels[selectedChannelIndex]
+                                                    if (!channel.isDivider) {
+                                                        playChannel(channel.streamUrl, channel.name)
+                                                    }
                                                 }
                                                 true
                                             }
@@ -792,25 +937,49 @@ fun TvScreenContent(
                                     } else false
                                 }
                         ) {
-                            itemsIndexed(epgChannels) { index, channel ->
-                                val isChannelSelected = index == selectedChannelIndex && focusLevel == FocusLevel.CONTENT
-                                
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(
-                                            if (isChannelSelected) DiokkoColors.SurfaceLight.copy(alpha = 0.5f)
-                                            else Color.Transparent
-                                        )
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    // Channel info column
+                            itemsIndexed(channels) { index, channel ->
+                                if (channel.isDivider) {
+                                    // Section header for dividers - centered
                                     Row(
                                         modifier = Modifier
-                                            .width(160.dp)
-                                            .clip(DiokkoShapes.small)
+                                            .fillMaxWidth()
+                                            .background(DiokkoColors.Accent.copy(alpha = 0.15f))
+                                            .padding(vertical = 8.dp, horizontal = 8.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "📁",
+                                            fontSize = 14.sp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = cleanDividerName(channel.name),
+                                            style = DiokkoTypography.labelMedium,
+                                            color = DiokkoColors.Accent,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                } else {
+                                    // Regular channel row
+                                    val isChannelSelected = index == selectedChannelIndex && focusLevel == FocusLevel.CONTENT
+                                
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
                                             .background(
-                                                if (isChannelSelected && selectedTimeSlot == -1) DiokkoColors.Accent
+                                                if (isChannelSelected) DiokkoColors.SurfaceLight.copy(alpha = 0.5f)
+                                                else Color.Transparent
+                                            )
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        // Channel info column
+                                        Row(
+                                            modifier = Modifier
+                                                .width(160.dp)
+                                                .clip(DiokkoShapes.small)
+                                                .background(
+                                                    if (isChannelSelected && selectedTimeSlot == -1) DiokkoColors.Accent
                                                 else DiokkoColors.Surface
                                             )
                                             .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -847,6 +1016,7 @@ fun TvScreenContent(
                                     // Program slots
                                     timeSlots.forEachIndexed { slotIndex, _ ->
                                         val isSlotSelected = isChannelSelected && slotIndex == selectedTimeSlot
+                                        val programTitle = getProgramForSlot(channel.id, slotIndex)
                                         
                                         Box(
                                             modifier = Modifier
@@ -869,10 +1039,78 @@ fun TvScreenContent(
                                             contentAlignment = Alignment.CenterStart
                                         ) {
                                             Text(
-                                                text = "No info",
+                                                text = programTitle,
                                                 style = DiokkoTypography.labelSmall,
                                                 color = if (isSlotSelected) DiokkoColors.TextOnAccent 
-                                                       else DiokkoColors.TextSecondary,
+                                                       else if (programTitle == "No info") DiokkoColors.TextSecondary
+                                                       else DiokkoColors.TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                } // End of Row for non-divider channel
+                                } // End of else (non-divider channel)
+                            }
+                        }
+                        
+                        // EPG Search Results Section (shown when searching)
+                        if (isSearchActive && epgSearchResults.isNotEmpty()) {
+                            Text(
+                                text = "📅 Programs matching \"$searchQuery\" (${epgSearchResults.size})",
+                                style = DiokkoTypography.labelMedium,
+                                color = DiokkoColors.Accent,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                            
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 200.dp)
+                                    .background(DiokkoColors.Surface.copy(alpha = 0.3f))
+                            ) {
+                                items(epgSearchResults) { result ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { playChannel(result.channel.streamUrl, result.channel.name) }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // Channel logo
+                                        Box(
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .clip(DiokkoShapes.small)
+                                                .background(DiokkoColors.SurfaceLight),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (!result.channel.logoUrl.isNullOrBlank()) {
+                                                AsyncImage(
+                                                    model = result.channel.logoUrl,
+                                                    contentDescription = result.channel.name,
+                                                    contentScale = ContentScale.Fit,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            } else {
+                                                Text(text = "📺", fontSize = 10.sp)
+                                            }
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = result.program.title,
+                                                style = DiokkoTypography.bodySmall,
+                                                color = DiokkoColors.TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${result.channel.name} • ${formatTime(result.program.startTime)} - ${formatTime(result.program.endTime)}",
+                                                style = DiokkoTypography.labelSmall,
+                                                color = DiokkoColors.TextSecondary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -972,9 +1210,24 @@ fun MoviesScreenContent(
         }
     }
     
+    // Center-anchored scrolling for categories
     LaunchedEffect(selectedCategoryIndex) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-            categoryListState.animateScrollToItem(selectedCategoryIndex)
+            val layoutInfo = categoryListState.layoutInfo
+            val viewportHeight = layoutInfo.viewportSize.height
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                visibleItems.map { it.size }.average().toInt()
+            } else {
+                40
+            }
+            
+            val centerOffset = -(viewportHeight / 2) + (avgItemHeight / 2)
+            categoryListState.animateScrollToItem(
+                index = selectedCategoryIndex,
+                scrollOffset = centerOffset
+            )
         }
     }
     
@@ -1285,9 +1538,24 @@ fun ShowsScreenContent(
         }
     }
     
+    // Center-anchored scrolling for categories
     LaunchedEffect(selectedCategoryIndex) {
         if (categories.isNotEmpty() && selectedCategoryIndex in categories.indices) {
-            categoryListState.animateScrollToItem(selectedCategoryIndex)
+            val layoutInfo = categoryListState.layoutInfo
+            val viewportHeight = layoutInfo.viewportSize.height
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                visibleItems.map { it.size }.average().toInt()
+            } else {
+                40
+            }
+            
+            val centerOffset = -(viewportHeight / 2) + (avgItemHeight / 2)
+            categoryListState.animateScrollToItem(
+                index = selectedCategoryIndex,
+                scrollOffset = centerOffset
+            )
         }
     }
     
@@ -1700,7 +1968,7 @@ fun GlobalSearchScreen(
         } catch (e: Exception) {}
     }
     
-    // Scroll to selected result
+    // Center-anchored scrolling for search results
     LaunchedEffect(selectedResultIndex, isSearchBarFocused) {
         if (!isSearchBarFocused && flatResults.isNotEmpty() && selectedResultIndex in flatResults.indices) {
             // Calculate scroll position accounting for headers
@@ -1715,7 +1983,23 @@ fun GlobalSearchScreen(
             // Add 1 for series header if we're past movies
             if (selectedResultIndex >= channelCount + movieCount && searchResults.series.isNotEmpty()) scrollIndex += 1
             
-            resultsListState.animateScrollToItem(scrollIndex.coerceIn(0, resultsListState.layoutInfo.totalItemsCount - 1))
+            val layoutInfo = resultsListState.layoutInfo
+            val viewportHeight = layoutInfo.viewportSize.height
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            val avgItemHeight = if (visibleItems.isNotEmpty()) {
+                visibleItems.map { it.size }.average().toInt()
+            } else {
+                60
+            }
+            
+            val centerOffset = -(viewportHeight / 2) + (avgItemHeight / 2)
+            val targetIndex = scrollIndex.coerceIn(0, resultsListState.layoutInfo.totalItemsCount - 1)
+            
+            resultsListState.animateScrollToItem(
+                index = targetIndex,
+                scrollOffset = centerOffset
+            )
         }
     }
     

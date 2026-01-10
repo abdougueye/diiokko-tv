@@ -138,7 +138,21 @@ interface ChannelDao {
 
     @Query("SELECT COUNT(*) FROM channels WHERE playlistId = :playlistId")
     suspend fun getChannelCountForPlaylist(playlistId: Long): Int
+    
+    @Query("SELECT c.id, c.epgChannelId FROM channels c INNER JOIN playlists p ON c.playlistId = p.id WHERE p.isActive = 1 AND c.epgChannelId IS NOT NULL")
+    suspend fun getActiveChannelsWithEpgId(): List<ChannelEpgMapping>
+    
+    @Query("SELECT c.id, c.epgChannelId FROM channels c WHERE c.playlistId = :playlistId AND c.epgChannelId IS NOT NULL AND c.epgChannelId != ''")
+    suspend fun getChannelsWithEpgIdForPlaylist(playlistId: Long): List<ChannelEpgMapping>
 }
+
+/**
+ * Helper class for EPG channel mapping
+ */
+data class ChannelEpgMapping(
+    val id: Long,
+    val epgChannelId: String
+)
 
 /**
  * Movie Data Access Object
@@ -312,6 +326,85 @@ interface EpgDao {
 
     @Query("SELECT * FROM epg_programs WHERE channelId = :channelId AND startTime > :currentTime ORDER BY startTime ASC LIMIT 1")
     suspend fun getNextProgram(channelId: Long, currentTime: Long): EpgProgram?
+    
+    @Query("""
+        SELECT ep.* FROM epg_programs ep 
+        INNER JOIN channels c ON ep.channelId = c.id 
+        WHERE c.epgChannelId = :epgChannelId AND ep.endTime > :currentTime 
+        ORDER BY ep.startTime ASC
+    """)
+    fun getProgramsByEpgChannelId(epgChannelId: String, currentTime: Long): Flow<List<EpgProgram>>
+    
+    @Query("""
+        SELECT ep.* FROM epg_programs ep 
+        INNER JOIN channels c ON ep.channelId = c.id 
+        WHERE c.epgChannelId = :epgChannelId 
+        AND ep.startTime <= :currentTime AND ep.endTime > :currentTime 
+        LIMIT 1
+    """)
+    suspend fun getCurrentProgramByEpgChannelId(epgChannelId: String, currentTime: Long): EpgProgram?
+    
+    /**
+     * OPTIMIZED: Fetch current programs for a specific GROUP TITLE using JOIN.
+     * Avoids "too many SQL variables" error by not passing channel ID lists.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE c.groupTitle = :groupTitle
+        AND ep.startTime <= :currentTime AND ep.endTime > :currentTime
+        ORDER BY c.`order` ASC
+    """)
+    suspend fun getCurrentProgramsForGroup(groupTitle: String, currentTime: Long): List<EpgProgram>
+    
+    /**
+     * OPTIMIZED: Fetch upcoming programs for a specific GROUP TITLE using JOIN.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE c.groupTitle = :groupTitle
+        AND ep.startTime > :currentTime
+        AND ep.startTime < :maxTime
+        ORDER BY c.`order` ASC, ep.startTime ASC
+    """)
+    suspend fun getUpcomingProgramsForGroup(groupTitle: String, currentTime: Long, maxTime: Long): List<EpgProgram>
+    
+    /**
+     * OPTIMIZED: Fetch current programs for a specific CATEGORY using JOIN.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE c.categoryId = :categoryId
+        AND ep.startTime <= :currentTime AND ep.endTime > :currentTime
+        ORDER BY c.`order` ASC
+    """)
+    suspend fun getCurrentProgramsForCategory(categoryId: Long, currentTime: Long): List<EpgProgram>
+    
+    /**
+     * OPTIMIZED: Fetch upcoming programs for a specific CATEGORY using JOIN.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE c.categoryId = :categoryId
+        AND ep.startTime > :currentTime
+        AND ep.startTime < :maxTime
+        ORDER BY c.`order` ASC, ep.startTime ASC
+    """)
+    suspend fun getUpcomingProgramsForCategory(categoryId: Long, currentTime: Long, maxTime: Long): List<EpgProgram>
+    
+    /**
+     * Fetch current programs for ALL channels (limited batch for initial load).
+     * Uses subquery to limit channels, avoiding "too many SQL variables".
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        WHERE ep.channelId IN (SELECT id FROM channels WHERE isDivider = 0 LIMIT 100)
+        AND ep.startTime <= :currentTime AND ep.endTime > :currentTime
+    """)
+    suspend fun getCurrentProgramsLimited(currentTime: Long): List<EpgProgram>
 
     @Transaction
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -319,9 +412,45 @@ interface EpgDao {
 
     @Query("DELETE FROM epg_programs WHERE channelId = :channelId")
     suspend fun deleteProgramsForChannel(channelId: Long)
+    
+    @Query("DELETE FROM epg_programs WHERE channelId IN (SELECT id FROM channels WHERE playlistId = :playlistId)")
+    suspend fun deleteProgramsForPlaylist(playlistId: Long)
 
     @Query("DELETE FROM epg_programs WHERE endTime < :timestamp")
     suspend fun deleteOldPrograms(timestamp: Long)
+    
+    @Query("DELETE FROM epg_programs")
+    suspend fun deleteAllPrograms()
+    
+    @Query("SELECT COUNT(*) FROM epg_programs")
+    suspend fun getProgramCount(): Int
+    
+    /**
+     * Search EPG programs by title.
+     * Returns programs with channel info for display.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        WHERE ep.title LIKE '%' || :query || '%'
+        AND ep.endTime > :currentTime
+        ORDER BY ep.startTime ASC
+        LIMIT 100
+    """)
+    suspend fun searchPrograms(query: String, currentTime: Long): List<EpgProgram>
+    
+    /**
+     * Search EPG programs within a specific group.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE ep.title LIKE '%' || :query || '%'
+        AND c.groupTitle = :groupTitle
+        AND ep.endTime > :currentTime
+        ORDER BY ep.startTime ASC
+        LIMIT 100
+    """)
+    suspend fun searchProgramsInGroup(query: String, groupTitle: String, currentTime: Long): List<EpgProgram>
 }
 
 /**
@@ -359,7 +488,7 @@ interface PlaybackHistoryDao {
         EpgProgram::class,
         PlaybackHistory::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
