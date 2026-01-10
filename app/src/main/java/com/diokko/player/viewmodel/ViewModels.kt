@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.diokko.player.data.models.*
 import com.diokko.player.data.repository.ContentRepository
+import com.diokko.player.data.repository.EpgSearchResult
 import com.diokko.player.data.repository.PlaylistRepository
 import com.diokko.player.ui.navigation.Screen
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -92,6 +93,10 @@ class TvViewModel @Inject constructor(
     private val _epgLastUpdated = MutableStateFlow<Long?>(null)
     val epgLastUpdated: StateFlow<Long?> = _epgLastUpdated.asStateFlow()
     
+    // EPG search results
+    private val _epgSearchResults = MutableStateFlow<List<EpgSearchResult>>(emptyList())
+    val epgSearchResults: StateFlow<List<EpgSearchResult>> = _epgSearchResults.asStateFlow()
+    
     // Contextual search
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -102,6 +107,7 @@ class TvViewModel @Inject constructor(
     private var channelsJob: kotlinx.coroutines.Job? = null
     private var categoriesJob: kotlinx.coroutines.Job? = null
     private var searchJob: kotlinx.coroutines.Job? = null
+    private var epgSearchJob: kotlinx.coroutines.Job? = null
     private var epgJob: kotlinx.coroutines.Job? = null
     
     // Store current category for search filtering
@@ -183,15 +189,18 @@ class TvViewModel @Inject constructor(
         }
     }
     
-    // Contextual search methods - searches ALL categories
+    // Contextual search methods - searches ALL categories and EPG
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
         _isSearchActive.value = query.isNotBlank()
         
         searchJob?.cancel()
+        epgSearchJob?.cancel()
         channelsJob?.cancel()
         
         if (query.isBlank()) {
+            // Clear EPG search results
+            _epgSearchResults.value = emptyList()
             // Reload current category or all channels
             if (currentGroupTitle != null) {
                 loadChannelsForGroup(currentGroupTitle!!)
@@ -215,12 +224,31 @@ class TvViewModel @Inject constructor(
                 }
             }
         }
+        
+        // Search EPG programs concurrently
+        epgSearchJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.delay(300)
+            
+            try {
+                val epgResults = if (currentGroupTitle != null) {
+                    epgRepository.searchProgramsInGroup(query, currentGroupTitle!!)
+                } else {
+                    epgRepository.searchPrograms(query)
+                }
+                _epgSearchResults.value = epgResults
+            } catch (e: Exception) {
+                android.util.Log.e("TvViewModel", "EPG search failed", e)
+                _epgSearchResults.value = emptyList()
+            }
+        }
     }
     
     fun clearSearch() {
         _searchQuery.value = ""
         _isSearchActive.value = false
         searchJob?.cancel()
+        epgSearchJob?.cancel()
+        _epgSearchResults.value = emptyList()
         
         // Reload current content
         if (currentGroupTitle != null) {
@@ -400,6 +428,7 @@ class TvViewModel @Inject constructor(
         channelsJob?.cancel()
         categoriesJob?.cancel()
         searchJob?.cancel()
+        epgSearchJob?.cancel()
         epgJob?.cancel()
     }
 }

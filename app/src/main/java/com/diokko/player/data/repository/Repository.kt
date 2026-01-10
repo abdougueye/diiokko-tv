@@ -1080,4 +1080,55 @@ class EpgRepository @Inject constructor(
     suspend fun clearAllEpg() {
         epgDao.deleteAllPrograms()
     }
+    
+    /**
+     * Search EPG programs by title.
+     * Returns programs with their associated channel info.
+     */
+    suspend fun searchPrograms(query: String): List<EpgSearchResult> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        
+        val currentTime = System.currentTimeMillis()
+        val programs = epgDao.searchPrograms(query.trim(), currentTime)
+        
+        // Fetch channel info for each program
+        programs.mapNotNull { program ->
+            val channel = channelDao.getChannelById(program.channelId)
+            if (channel != null) {
+                EpgSearchResult(
+                    program = program,
+                    channel = channel
+                )
+            } else null
+        }
+    }
+    
+    /**
+     * Search EPG programs within a specific group.
+     */
+    suspend fun searchProgramsInGroup(query: String, groupTitle: String): List<EpgSearchResult> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        
+        val currentTime = System.currentTimeMillis()
+        val programs = epgDao.searchProgramsInGroup(query.trim(), groupTitle, currentTime)
+        
+        // Fetch channel info for each program
+        programs.mapNotNull { program ->
+            val channel = channelDao.getChannelById(program.channelId)
+            if (channel != null) {
+                EpgSearchResult(
+                    program = program,
+                    channel = channel
+                )
+            } else null
+        }
+    }
 }
+
+/**
+ * EPG Search Result with channel info
+ */
+data class EpgSearchResult(
+    val program: EpgProgram,
+    val channel: Channel
+)

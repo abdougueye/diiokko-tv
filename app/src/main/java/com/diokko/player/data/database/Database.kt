@@ -424,6 +424,33 @@ interface EpgDao {
     
     @Query("SELECT COUNT(*) FROM epg_programs")
     suspend fun getProgramCount(): Int
+    
+    /**
+     * Search EPG programs by title.
+     * Returns programs with channel info for display.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        WHERE ep.title LIKE '%' || :query || '%'
+        AND ep.endTime > :currentTime
+        ORDER BY ep.startTime ASC
+        LIMIT 100
+    """)
+    suspend fun searchPrograms(query: String, currentTime: Long): List<EpgProgram>
+    
+    /**
+     * Search EPG programs within a specific group.
+     */
+    @Query("""
+        SELECT ep.* FROM epg_programs ep
+        INNER JOIN channels c ON ep.channelId = c.id
+        WHERE ep.title LIKE '%' || :query || '%'
+        AND c.groupTitle = :groupTitle
+        AND ep.endTime > :currentTime
+        ORDER BY ep.startTime ASC
+        LIMIT 100
+    """)
+    suspend fun searchProgramsInGroup(query: String, groupTitle: String, currentTime: Long): List<EpgProgram>
 }
 
 /**
